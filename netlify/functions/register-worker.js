@@ -1,28 +1,34 @@
 const { GoogleAuth } = require('google-auth-library');
 const { google } = require('googleapis');
 const nodemailer = require('nodemailer');
+const multiparty = require('multiparty');
+
+require('dotenv').config();
 
 // Configurar Nodemailer
 let transporter;
 try {
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    transporter = nodemailer.createTransporter({
+    transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === 'true',
+      secure: process.env.SMTP_SECURE === 'true', // true para puerto 465, false para otros puertos
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
       },
       tls: {
-        rejectUnauthorized: false
+        rejectUnauthorized: false // Para desarrollo, en producción considera configurar certificados
       },
-      connectionTimeout: 60000,
-      greetingTimeout: 30000,
-      socketTimeout: 60000
+      // Configuraciones adicionales para mayor compatibilidad
+      connectionTimeout: 60000, // 60 segundos
+      greetingTimeout: 30000, // 30 segundos
+      socketTimeout: 60000, // 60 segundos
+      debug: process.env.NODE_ENV === 'development', // Debug en desarrollo
+      logger: process.env.NODE_ENV === 'development' // Logger en desarrollo
     });
 
-    // Verificar configuración
+    // Verificar la configuración al inicializar
     transporter.verify((error, success) => {
       if (error) {
         console.error('Error en la configuración SMTP:', error);
@@ -31,19 +37,18 @@ try {
       }
     });
   } else {
-    console.warn('Configuración SMTP incompleta');
+    console.warn('Configuración SMTP incompleta. Variables requeridas: SMTP_HOST, SMTP_USER, SMTP_PASS');
   }
 } catch (error) {
   console.error('Error configurando Nodemailer:', error);
 }
 
-// Función simplificada para subir archivos DNI
-async function uploadDNIImages(drive, carpetaId, dniDelanteData, dniDetrasData) {
+async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile) {
   const uploadedFiles = {};
   
   try {
-    // Buscar o crear subcarpeta "Documentos Personales"
-    let documentosPersonalesFolderId = carpetaId; // Fallback a carpeta principal
+    // Primero buscar la subcarpeta "Documentos Personales"
+    let documentosPersonalesFolderId = null;
     
     try {
       const subcarpetasResponse = await drive.files.list({
@@ -53,7 +58,10 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteData, dniDetrasData) 
       
       if (subcarpetasResponse.data.files && subcarpetasResponse.data.files.length > 0) {
         documentosPersonalesFolderId = subcarpetasResponse.data.files[0].id;
+        console.log('Subcarpeta "Documentos Personales" encontrada:', documentosPersonalesFolderId);
       } else {
+        // Si no existe la subcarpeta, crearla
+        console.log('Subcarpeta "Documentos Personales" no encontrada, creándola...');
         const newSubfolderResponse = await drive.files.create({
           resource: {
             name: 'Documentos Personales',
@@ -62,41 +70,46 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteData, dniDetrasData) 
           }
         });
         documentosPersonalesFolderId = newSubfolderResponse.data.id;
+        console.log('Subcarpeta "Documentos Personales" creada:', documentosPersonalesFolderId);
       }
     } catch (folderError) {
-      console.error('Error con subcarpeta, usando carpeta principal:', folderError);
+      console.error('Error buscando/creando subcarpeta:', folderError);
+      // Si falla, usar la carpeta principal como fallback
+      documentosPersonalesFolderId = carpetaId;
     }
     
-    // Subir DNI Delante
-    if (dniDelanteData) {
+    // Subir archivo DNI Delante
+    if (dniDelanteFile) {
       const dniDelanteResponse = await drive.files.create({
         resource: {
-          name: `DNI_Delante_${Date.now()}.jpg`,
-          parents: [documentosPersonalesFolderId]
+          name: `DNI_Delante_${dniDelanteFile.originalFilename || 'documento.jpg'}`,
+          parents: [documentosPersonalesFolderId] // Usar la subcarpeta específica
         },
         media: {
-          mimeType: 'image/jpeg',
-          body: dniDelanteData
+          mimeType: dniDelanteFile.headers['content-type'] || 'image/jpeg',
+          body: require('fs').createReadStream(dniDelanteFile.path)
         }
       });
       
       uploadedFiles.dniDelanteUrl = `https://drive.google.com/file/d/${dniDelanteResponse.data.id}/view`;
+      console.log('DNI Delante subido exitosamente a Documentos Personales');
     }
     
-    // Subir DNI Detrás
-    if (dniDetrasData) {
+    // Subir archivo DNI Detrás
+    if (dniDetrasFile) {
       const dniDetrasResponse = await drive.files.create({
         resource: {
-          name: `DNI_Detras_${Date.now()}.jpg`,
-          parents: [documentosPersonalesFolderId]
+          name: `DNI_Detras_${dniDetrasFile.originalFilename || 'documento.jpg'}`,
+          parents: [documentosPersonalesFolderId] // Usar la subcarpeta específica
         },
         media: {
-          mimeType: 'image/jpeg',
-          body: dniDetrasData
+          mimeType: dniDetrasFile.headers['content-type'] || 'image/jpeg',
+          body: require('fs').createReadStream(dniDetrasFile.path)
         }
       });
       
       uploadedFiles.dniDetrasUrl = `https://drive.google.com/file/d/${dniDetrasResponse.data.id}/view`;
+      console.log('DNI Detrás subido exitosamente a Documentos Personales');
     }
     
   } catch (error) {
@@ -107,21 +120,23 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteData, dniDetrasData) 
   return uploadedFiles;
 }
 
-// Función para enviar email de confirmación
 async function sendConfirmationEmail(correo, nombre, empresa) {
   if (!transporter) {
-    console.log('Nodemailer no configurado');
+    console.log('Nodemailer no configurado, saltando envío de email');
     return { success: false, error: 'Transportador no configurado' };
   }
 
   try {
-    // Validaciones
+    // Validar datos antes de enviar
     if (!correo || !nombre || !empresa) {
+      console.log('Datos insuficientes para enviar email:', { correo, nombre, empresa });
       return { success: false, error: 'Datos insuficientes' };
     }
 
+    // Validar formato de email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(correo)) {
+      console.log('Email inválido:', correo);
       return { success: false, error: 'Email inválido' };
     }
 
@@ -146,13 +161,16 @@ async function sendConfirmationEmail(correo, nombre, empresa) {
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <title>Bienvenido al Sistema</title>
         </head>
-        <body style="margin: 0; padding: 20px; font-family: Arial, sans-serif; background-color: #f4f4f4;">
+        <body style="margin: 0; padding: 20px; font-family: 'Arial', sans-serif; background-color: #f4f4f4;">
           <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            
+            <!-- Header -->
             <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
               <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 300;">¡Bienvenido al Sistema!</h1>
               <p style="color: #e8f0fe; margin: 10px 0 0 0; font-size: 16px;">Tu registro se ha completado exitosamente</p>
             </div>
             
+            <!-- Content -->
             <div style="padding: 40px 30px;">
               <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
                 Hola <strong style="color: #667eea;">${nombre}</strong>,
@@ -162,7 +180,8 @@ async function sendConfirmationEmail(correo, nombre, empresa) {
                 Te confirmamos que tu registro en el Sistema de Gestión Documental se ha completado exitosamente.
               </p>
               
-              <div style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
+              <!-- Info Box -->
+              <div style="background: linear-gradient(135deg,rgb(200, 227, 248) 0%, #7bbbea 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
                 <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📋 Datos de tu registro</h3>
                 <table style="width: 100%; color: white;">
                   <tr>
@@ -184,100 +203,194 @@ async function sendConfirmationEmail(correo, nombre, empresa) {
                 </table>
               </div>
               
+              <!-- Features -->
+              <div style="margin: 30px 0;">
+                <h3 style="color: #333; margin-bottom: 20px; font-size: 18px;">🚀 ¿Qué puedes hacer ahora?</h3>
+                <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
+                  <ul style="margin: 0; padding-left: 20px; color: #666;">
+                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Ver y descargar tus documentos personales</li>
+                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Consultar nóminas, contratos y otros documentos</li>
+                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Recibir notificaciones de nuevos archivos</li>
+                    <li style="margin-bottom: 0; line-height: 1.6;">✅ Gestionar y firmar tus documentos</li>
+                  </ul>
+                </div>
+              </div>
+              
+              <!-- CTA Button -->
               <div style="text-align: center; margin: 40px 0;">
-                <a href="${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app'}" 
-                   style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px;">
+                <a href="${process.env.APP_URL || 'https://tu-dominio.com'}" 
+                   style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s;">
                   🔗 Acceder al Sistema
                 </a>
               </div>
+              
+              <!-- Help Section -->
+              <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 30px 0;">
+                <h4 style="color: #856404; margin: 0 0 10px 0; font-size: 16px;">💡 ¿Necesitas ayuda?</h4>
+                <p style="color: #856404; margin: 0; font-size: 14px; line-height: 1.5;">
+                  Si tienes alguna pregunta o necesitas ayuda, no dudes en contactar con el administrador del sistema.
+                </p>
+              </div>
             </div>
             
+            <!-- Footer -->
             <div style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #dee2e6;">
-              <p style="color: #6c757d; font-size: 12px; margin: 0;">
-                © ${new Date().getFullYear()} Sistema de Gestión Documental.
+              <p style="color: #6c757d; font-size: 12px; margin: 0 0 10px 0;">
+                Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
+              </p>
+              <p style="color: #868e96; font-size: 11px; margin: 0;">
+                Por favor, no respondas a este mensaje. © ${new Date().getFullYear()} Sistema de Gestión Documental.
               </p>
             </div>
           </div>
         </body>
         </html>
       `,
+      // Versión en texto plano mejorada
       text: `
+🎉 ¡Bienvenido al Sistema de Gestión Documental!
+
 Hola ${nombre},
 
-Tu registro en el Sistema de Gestión Documental se ha completado exitosamente.
+Te confirmamos que tu registro en el Sistema de Gestión Documental se ha completado exitosamente.
 
-Datos de tu registro:
-- Nombre: ${nombre}
-- Empresa: ${empresa}
-- Email: ${correo}
-- Fecha: ${fechaRegistro}
+📋 DATOS DE TU REGISTRO:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Nombre: ${nombre}
+• Empresa: ${empresa}
+• Email: ${correo}
+• Fecha de registro: ${fechaRegistro}
 
-Accede al sistema en: ${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app'}
+🚀 ¿QUÉ PUEDES HACER AHORA?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Acceder a tus documentos personales
+✅ Consultar nóminas, contratos y otros documentos
+✅ Recibir notificaciones de nuevos documentos
+✅ Gestionar tu perfil y preferencias
 
-Gracias,
-Sistema de Gestión Documental
-      `
+🔗 ACCEDER AL SISTEMA:
+${process.env.APP_URL || 'https://tu-dominio.com'}
+
+💡 ¿NECESITAS AYUDA?
+Si tienes alguna pregunta o necesitas ayuda, no dudes en contactar con el administrador del sistema.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
+Por favor, no respondas a este mensaje.
+© ${new Date().getFullYear()} Sistema de Gestión Documental.
+      `,
+      // Configuraciones adicionales
+      priority: 'normal',
+      headers: {
+        'X-Mailer': 'Sistema de Gestión Documental v1.0',
+        'X-Priority': '3'
+      }
     };
+
+    console.log('Enviando email a:', correo);
+    console.log('Configuración SMTP:', {
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT,
+      user: process.env.SMTP_USER,
+      from: mailOptions.from
+    });
 
     const result = await transporter.sendMail(mailOptions);
     
-    console.log('Email enviado exitosamente:', result.messageId);
+    console.log('✅ Email enviado exitosamente:', {
+      messageId: result.messageId,
+      accepted: result.accepted,
+      rejected: result.rejected,
+      to: correo,
+      subject: mailOptions.subject
+    });
+
     return { 
       success: true, 
-      messageId: result.messageId
+      messageId: result.messageId,
+      accepted: result.accepted,
+      rejected: result.rejected
     };
 
   } catch (error) {
-    console.error('Error enviando email:', error);
+    console.error('❌ Error enviando email:', {
+      error: error.message,
+      code: error.code,
+      command: error.command,
+      to: correo,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+    
     return { 
       success: false, 
-      error: error.message
+      error: error.message,
+      code: error.code
     };
   }
 }
 
-// Función simplificada para parsear FormData
+// Función para parsear FormData usando multiparty
 function parseFormData(event) {
-  try {
-    // Primero intentar parsear como JSON
-    if (event.headers['content-type'] && event.headers['content-type'].includes('application/json')) {
-      const jsonData = JSON.parse(event.body);
-      return {
-        fields: jsonData,
-        files: {
-          dniDelante: jsonData.dniDelante ? {
-            buffer: Buffer.from(jsonData.dniDelante.split(',')[1], 'base64'),
-            originalFilename: jsonData.dniDelanteNombre || 'dni_delante.jpg'
-          } : null,
-          dniDetras: jsonData.dniDetras ? {
-            buffer: Buffer.from(jsonData.dniDetras.split(',')[1], 'base64'),
-            originalFilename: jsonData.dniDetrasNombre || 'dni_detras.jpg'
-          } : null
-        }
-      };
+  return new Promise((resolve, reject) => {
+    const form = new multiparty.Form();
+    
+    // Convertir el body si viene en base64
+    let bodyBuffer;
+    if (event.isBase64Encoded) {
+      bodyBuffer = Buffer.from(event.body, 'base64');
+    } else {
+      bodyBuffer = Buffer.from(event.body);
     }
 
-    // Si no es JSON, intentar parsear multipart (implementación básica)
-    const boundary = event.headers['content-type']?.split('boundary=')[1];
-    if (!boundary) {
-      throw new Error('No se encontró boundary en multipart');
-    }
+    // Crear un stream readable del body
+    const { Readable } = require('stream');
+    const bodyStream = new Readable();
+    bodyStream.push(bodyBuffer);
+    bodyStream.push(null);
+    
+    // Agregar headers y método requeridos por multiparty
+    bodyStream.headers = event.headers;
+    bodyStream.method = 'POST';
 
-    // Para simplificar, devolver estructura básica
-    // En producción, considera usar una librería más robusta
-    return {
-      fields: {},
-      files: {}
-    };
+    const fields = {};
+    const files = {};
 
-  } catch (error) {
-    console.error('Error parseando FormData:', error);
-    throw error;
-  }
+    form.on('field', (name, value) => {
+      fields[name] = value;
+    });
+
+    form.on('part', (part) => {
+      if (part.filename) {
+        // Es un archivo
+        const chunks = [];
+        part.on('data', (chunk) => {
+          chunks.push(chunk);
+        });
+        part.on('end', () => {
+          files[part.name] = {
+            originalFilename: part.filename,
+            headers: part.headers,
+            buffer: Buffer.concat(chunks)
+          };
+        });
+      }
+    });
+
+    form.on('error', (err) => {
+      reject(err);
+    });
+
+    form.on('close', () => {
+      resolve({ fields, files });
+    });
+
+    // Parsear el stream
+    form.parse(bodyStream);
+  });
 }
 
 exports.handler = async (event, context) => {
-  // Headers CORS
+  // CORS headers
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
@@ -297,35 +410,24 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🚀 Iniciando registro de trabajador...');
-    console.log('Headers recibidos:', JSON.stringify(event.headers, null, 2));
-
-    // Validar variables de entorno críticas
-    const requiredEnvVars = [
-      'GOOGLE_PROJECT_ID',
-      'GOOGLE_PRIVATE_KEY',
-      'GOOGLE_CLIENT_EMAIL',
-      'GOOGLE_SHEET_ID',
-      'GOOGLE_DRIVE_PARENT_FOLDER_ID'
-    ];
-
-    const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
-    if (missingEnvVars.length > 0) {
-      console.error('Variables de entorno faltantes:', missingEnvVars);
-      return {
-        statusCode: 500,
-        headers,
-        body: JSON.stringify({ 
-          error: 'Configuración del servidor incompleta',
-          missing: missingEnvVars
-        })
-      };
-    }
-
-    // Parsear datos del formulario
+    // Parsear FormData
     let formData;
     try {
-      formData = parseFormData(event);
+      // Verificar si es JSON (fallback para compatibilidad)
+      if (event.headers['content-type'] && event.headers['content-type'].includes('application/json')) {
+        // Mantener compatibilidad con requests JSON antiguos
+        const jsonData = JSON.parse(event.body);
+        formData = {
+          fields: jsonData,
+          files: {
+            dniDelante: jsonData.dniDelante ? { buffer: Buffer.from(jsonData.dniDelante.split(',')[1], 'base64'), originalFilename: jsonData.dniDelanteNombre } : null,
+            dniDetras: jsonData.dniDetras ? { buffer: Buffer.from(jsonData.dniDetras.split(',')[1], 'base64'), originalFilename: jsonData.dniDetrasNombre } : null
+          }
+        };
+      } else {
+        // Parsear como FormData
+        formData = await parseFormData(event);
+      }
     } catch (parseError) {
       console.error('Error parseando datos:', parseError);
       return {
@@ -340,9 +442,7 @@ exports.handler = async (event, context) => {
       nombre, dni, correo, telefono, direccion, empresa, talla
     } = fields;
 
-    console.log('Datos recibidos:', { nombre, dni, correo, empresa });
-
-    // Validaciones
+    // Validaciones básicas
     if (!nombre || !dni || !correo || !telefono || !direccion || !empresa || !talla) {
       return {
         statusCode: 400,
@@ -351,7 +451,16 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Validar email
+    // Validar que se hayan subido las fotos del DNI
+    if (!files.dniDelante || !files.dniDetras) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: 'Debes subir ambas fotos del DNI (delante y detrás)' })
+      };
+    }
+
+    // Validar formato de email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(correo)) {
       return {
@@ -361,8 +470,7 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Configurar Google Auth
-    console.log('🔐 Configurando autenticación Google...');
+    // Configurar autenticación con Google
     const auth = new GoogleAuth({
       credentials: {
         type: 'service_account',
@@ -385,8 +493,7 @@ exports.handler = async (event, context) => {
     const sheets = google.sheets({ version: 'v4', auth });
     const drive = google.drive({ version: 'v3', auth });
 
-    // Verificar trabajador existente
-    console.log('🔍 Verificando trabajador existente...');
+    // Verificar si el trabajador ya existe
     try {
       const existingResponse = await sheets.spreadsheets.values.get({
         spreadsheetId: process.env.GOOGLE_SHEET_ID,
@@ -407,14 +514,14 @@ exports.handler = async (event, context) => {
       }
     } catch (checkError) {
       console.error('Error verificando trabajador existente:', checkError);
+      // Continuar con el registro aunque falle la verificación
     }
 
-    // Generar datos
+    // Generar ID interno
     const idInterno = `WRK-${Date.now()}`;
     const fechaIncorporacion = new Date().toLocaleDateString('es-ES');
 
-    console.log('📁 Creando carpeta en Google Drive...');
-    // Crear carpeta en Drive
+    // 1. Crear carpeta en Google Drive
     const carpetaMetadata = {
       name: `${nombre} - ${empresa}`,
       mimeType: 'application/vnd.google-apps.folder',
@@ -429,8 +536,7 @@ exports.handler = async (event, context) => {
     const carpetaId = carpetaResponse.data.id;
     const carpetaUrl = `https://drive.google.com/drive/folders/${carpetaId}`;
 
-    console.log('📂 Creando subcarpetas...');
-    // Crear subcarpetas
+    // Crear subcarpetas organizadas ANTES de subir los archivos DNI
     const subcarpetas = [
       'Nóminas', 
       'Contratos', 
@@ -439,111 +545,147 @@ exports.handler = async (event, context) => {
       'Certificados'
     ];
     
+    const subcarpetasCreadas = {};
+    
     for (const subcarpeta of subcarpetas) {
       try {
-        await drive.files.create({
+        const subfolderResponse = await drive.files.create({
           resource: {
             name: subcarpeta,
             mimeType: 'application/vnd.google-apps.folder',
             parents: [carpetaId]
           }
         });
+        subcarpetasCreadas[subcarpeta] = subfolderResponse.data.id;
+        console.log(`Subcarpeta ${subcarpeta} creada exitosamente:`, subfolderResponse.data.id);
       } catch (subfolderError) {
         console.error(`Error creando subcarpeta ${subcarpeta}:`, subfolderError);
+        // Continuar aunque falle crear alguna subcarpeta
       }
     }
 
-    // Subir imágenes DNI (si existen)
-    let dniUrls = {};
-    if (files.dniDelante && files.dniDetras) {
-      console.log('📷 Subiendo imágenes DNI...');
-      try {
-        const { Readable } = require('stream');
-        
-        const dniDelanteStream = new Readable();
-        dniDelanteStream.push(files.dniDelante.buffer);
-        dniDelanteStream.push(null);
+    // 2. Crear archivos temporales para subir a Google Drive
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
 
-        const dniDetrasStream = new Readable();
-        dniDetrasStream.push(files.dniDetras.buffer);
-        dniDetrasStream.push(null);
+    let tempFilePaths = [];
+    try {
+      // Crear archivos temporales
+      const dniDelantePath = path.join(os.tmpdir(), `dni_delante_${Date.now()}.jpg`);
+      const dniDetrasPath = path.join(os.tmpdir(), `dni_detras_${Date.now()}.jpg`);
+      
+      fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
+      fs.writeFileSync(dniDetrasPath, files.dniDetras.buffer);
+      
+      tempFilePaths = [dniDelantePath, dniDetrasPath];
 
-        dniUrls = await uploadDNIImages(drive, carpetaId, dniDelanteStream, dniDetrasStream);
-      } catch (uploadError) {
-        console.error('Error subiendo imágenes DNI:', uploadError);
-        // Continuar sin las imágenes
-      }
-    }
+      // Crear objetos compatibles con la función de subida
+      const dniDelanteFile = {
+        path: dniDelantePath,
+        originalFilename: files.dniDelante.originalFilename,
+        headers: files.dniDelante.headers || { 'content-type': 'image/jpeg' }
+      };
 
-    console.log('📝 Añadiendo registro a Google Sheets...');
-    // Añadir a Sheets
-    const valores = [
-      [
-        nombre,
-        dni,
-        correo,
-        telefono,
-        direccion,
-        empresa,
-        talla,
-        idInterno,
-        carpetaUrl,
-        'Activo',
-        fechaIncorporacion,
-        '',
-        '0',
-        'Registro completado',
-        dniUrls.dniDelanteUrl || '',
-        dniUrls.dniDetrasUrl || ''
-      ]
-    ];
+      const dniDetrasFile = {
+        path: dniDetrasPath,
+        originalFilename: files.dniDetras.originalFilename,
+        headers: files.dniDetras.headers || { 'content-type': 'image/jpeg' }
+      };
 
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: 'Trabajadores!A:P',
-      valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: valores
-      }
-    });
+      // Subir imágenes del DNI a Google Drive (ahora se subirán a "Documentos Personales")
+      const dniUrls = await uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile);
 
-    // Enviar email
-    console.log('📧 Enviando email de confirmación...');
-    const emailResult = await sendConfirmationEmail(correo, nombre, empresa);
+      // 3. Añadir fila a Google Sheets
+      const valores = [
+        [
+          nombre,                    // A: Nombre completo
+          dni,                      // B: DNI/NIE
+          correo,                   // C: Correo
+          telefono,                 // D: Teléfono
+          direccion,                // E: Dirección
+          empresa,                  // F: Empresa
+          talla,                    // G: Talla
+          idInterno,                // H: ID interno
+          carpetaUrl,               // I: Carpeta Drive URL
+          'Activo',                 // J: Estado
+          fechaIncorporacion,       // K: Fecha incorporación
+          '',                       // L: Último doc firmado
+          '0',                      // M: Total docs
+          'Registro completado',    // N: Observaciones
+          dniUrls.dniDelanteUrl || '', // O: URL DNI Delante
+          dniUrls.dniDetrasUrl || ''   // P: URL DNI Detrás
+        ]
+      ];
 
-    console.log('✅ Registro completado exitosamente');
-    return {
-      statusCode: 200,
-      headers,
-      body: JSON.stringify({
-        message: 'Trabajador registrado exitosamente',
-        idInterno,
-        carpetaUrl,
-        emailSent: emailResult.success,
-        emailDetails: emailResult.success ? {
-          messageId: emailResult.messageId,
-          status: 'enviado'
-        } : {
-          error: emailResult.error,
-          status: 'fallido'
-        },
-        details: {
-          nombre,
-          empresa,
-          correo,
-          fechaRegistro: fechaIncorporacion
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: process.env.GOOGLE_SHEET_ID,
+        range: 'Trabajadores!A:P',
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: valores
         }
-      })
-    };
+      });
+
+      // 4. Enviar email de confirmación
+      console.log('🔔 Iniciando envío de email de confirmación...');
+      const emailResult = await sendConfirmationEmail(correo, nombre, empresa);
+      
+      if (emailResult.success) {
+        console.log('✅ Email de confirmación enviado exitosamente:', emailResult.messageId);
+      } else {
+        console.log('⚠️ Email de confirmación no pudo ser enviado:', emailResult.error);
+      }
+
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          message: 'Trabajador registrado exitosamente',
+          idInterno,
+          carpetaUrl,
+          emailSent: emailResult.success,
+          emailDetails: emailResult.success ? {
+            messageId: emailResult.messageId,
+            status: 'enviado'
+          } : {
+            error: emailResult.error,
+            status: 'fallido'
+          },
+          dniUploaded: {
+            delante: !!dniUrls.dniDelanteUrl,
+            detras: !!dniUrls.dniDetrasUrl
+          },
+          details: {
+            nombre,
+            empresa,
+            correo,
+            fechaRegistro: fechaIncorporacion
+          }
+        })
+      };
+
+    } finally {
+      // Limpiar archivos temporales
+      tempFilePaths.forEach(filePath => {
+        try {
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+          }
+        } catch (cleanupError) {
+          console.error('Error limpiando archivo temporal:', cleanupError);
+        }
+      });
+    }
 
   } catch (error) {
-    console.error('💥 Error general:', error);
+    console.error('Error:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Error interno del servidor',
-        details: process.env.NODE_ENV === 'development' ? error.message : 'Por favor, inténtalo de nuevo'
+        error: 'Error interno del servidor. Por favor, inténtalo de nuevo en unos minutos.',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
       })
     };
   }

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
+// Configuración de API para desarrollo y producción
 const API_BASE = process.env.NODE_ENV === 'production' 
   ? '/.netlify/functions' 
   : 'http://localhost:8888/.netlify/functions';
@@ -53,12 +54,14 @@ function App() {
       // Validar tamaño (max 5MB)
       if (file.size > 5 * 1024 * 1024) {
         setMessage('❌ La imagen es demasiado grande. Máximo 5MB.');
+        e.target.value = ''; // Limpiar el input
         return;
       }
       
       // Validar tipo
       if (!file.type.startsWith('image/')) {
         setMessage('❌ Solo se permiten archivos de imagen.');
+        e.target.value = ''; // Limpiar el input
         return;
       }
       
@@ -72,10 +75,17 @@ function App() {
     setMessage('');
 
     try {
+      // Validaciones adicionales
+      if (!formData.dniDelante || !formData.dniDetras) {
+        setMessage('❌ Debes subir ambas fotos del DNI');
+        setLoading(false);
+        return;
+      }
+
       // Construir dirección completa
       const direccionCompleta = `${formData.calle} ${formData.numero}, ${formData.codigoPostal} ${formData.localidad}, ${formData.provincia}`;
       
-      // Crear FormData en lugar de JSON para manejar archivos
+      // Crear FormData
       const formDataToSend = new FormData();
       
       // Agregar datos de texto
@@ -87,23 +97,24 @@ function App() {
       formDataToSend.append('empresa', formData.empresa);
       formDataToSend.append('talla', formData.talla);
       
-      // Agregar archivos si existen
-      if (formData.dniDelante) {
-        formDataToSend.append('dniDelante', formData.dniDelante);
-      }
-      if (formData.dniDetras) {
-        formDataToSend.append('dniDetras', formData.dniDetras);
-      }
+      // Agregar archivos
+      formDataToSend.append('dniDelante', formData.dniDelante);
+      formDataToSend.append('dniDetras', formData.dniDetras);
+
+      console.log('Enviando formulario a:', `${API_BASE}/register-worker`);
 
       const response = await fetch(`${API_BASE}/register-worker`, {
         method: 'POST',
-        body: formDataToSend // No agregar Content-Type header, el navegador lo hace automáticamente
+        body: formDataToSend
+        // NO establecer Content-Type header cuando uses FormData
       });
 
       const result = await response.json();
+      console.log('Respuesta del servidor:', result);
 
       if (response.ok) {
         setMessage('✅ Trabajador registrado exitosamente. Recibirás un email de confirmación en breve.');
+        // Resetear formulario
         setFormData({ 
           nombre: '', dni: '', correo: '', telefono: '', 
           calle: '', numero: '', codigoPostal: '', localidad: '', provincia: '',
@@ -113,14 +124,14 @@ function App() {
         const fileInputs = document.querySelectorAll('input[type="file"]');
         fileInputs.forEach(input => input.value = '');
       } else {
-        setMessage(`❌ Error: ${result.error}`);
+        setMessage(`❌ Error: ${result.error || 'Error desconocido'}`);
       }
     } catch (error) {
       console.error('Error en registro:', error);
       setMessage('❌ Error de conexión. Por favor, inténtalo de nuevo.');
+    } finally {
+      setLoading(false);
     }
-
-    setLoading(false);
   };
 
   const handleLogin = async (e) => {
@@ -129,51 +140,53 @@ function App() {
     setMessage('');
 
     try {
+      console.log('Iniciando login con:', loginData);
+      
       const response = await fetch(`${API_BASE}/worker-documents`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
         body: JSON.stringify(loginData)
       });
 
       const result = await response.json();
+      console.log('Respuesta del servidor:', result);
 
       if (response.ok) {
         setFolderStructure(result.folderStructure);
         setWorkerInfo(result.workerInfo);
-        setCurrentFolder(result.folderStructure); // Empezar en la carpeta raíz
+        setCurrentFolder(result.folderStructure);
         setNavigationPath([{ nombre: result.folderStructure.nombre, folder: result.folderStructure }]);
         setIsLoggedIn(true);
-        setMessage('');
+        setMessage('✅ Acceso exitoso');
       } else {
-        setMessage(`❌ ${result.error}`);
+        setMessage(`❌ ${result.error || 'Error al acceder'}`);
       }
     } catch (error) {
+      console.error('Error en login:', error);
       setMessage('❌ Error de conexión. Por favor, inténtalo de nuevo.');
+    } finally {
+      setLoading(false);
     }
-
-    setLoading(false);
   };
 
   const navigateToFolder = (folder) => {
     setCurrentFolder(folder);
-    // Agregar la carpeta actual al path de navegación
     setNavigationPath(prev => [...prev, { nombre: folder.nombre, folder: folder }]);
   };
 
   const navigateToPath = (index) => {
-    // Navegar a una carpeta específica en el path
     const targetPath = navigationPath[index];
     setCurrentFolder(targetPath.folder);
-    // Cortar el path hasta el índice seleccionado
     setNavigationPath(prev => prev.slice(0, index + 1));
   };
 
   const goBack = () => {
     if (navigationPath.length > 1) {
-      // Remover la carpeta actual del path
       const newPath = navigationPath.slice(0, -1);
       setNavigationPath(newPath);
-      // Navegar a la carpeta anterior
       setCurrentFolder(newPath[newPath.length - 1].folder);
     }
   };
@@ -185,13 +198,14 @@ function App() {
     setCurrentFolder(null);
     setNavigationPath([]);
     setLoginData({ dni: '', correo: '' });
+    setMessage('');
   };
 
   const renderBreadcrumb = () => {
     return (
       <div className="breadcrumb">
         {navigationPath.map((pathItem, index) => (
-          <span key={index}>
+          <React.Fragment key={index}>
             {index > 0 && <span className="breadcrumb-separator"> {'>'} </span>}
             <button 
               className="breadcrumb-item"
@@ -200,7 +214,7 @@ function App() {
             >
               {pathItem.nombre}
             </button>
-          </span>
+          </React.Fragment>
         ))}
       </div>
     );
@@ -214,7 +228,6 @@ function App() {
 
     return (
       <div className="folder-view">
-        {/* Navegación */}
         <div className="folder-navigation">
           {renderBreadcrumb()}
           {navigationPath.length > 1 && (
@@ -224,7 +237,6 @@ function App() {
           )}
         </div>
 
-        {/* Subcarpetas */}
         {hasSubfolders && (
           <div className="folders-section">
             <h3>📁 Carpetas</h3>
@@ -252,7 +264,6 @@ function App() {
           </div>
         )}
 
-        {/* Documentos */}
         {hasDocuments && (
           <div className="documents-section">
             <h3>📄 Documentos</h3>
@@ -276,7 +287,6 @@ function App() {
           </div>
         )}
 
-        {/* Estado vacío */}
         {!hasSubfolders && !hasDocuments && (
           <div className="empty-folder">
             <div className="empty-folder-icon">📂</div>

@@ -1,10 +1,6 @@
 {
   "name": "functions",
   "version": "1.0.0",
-  "dependencies": {
-    "google-auth-library": "^9.15.1",
-    "googleapis": "^126.0.1"
-  },
   "main": "register-worker.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -12,5 +8,12 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": ""
+  "description": "",
+  "dependencies": {
+    "dotenv": "^17.0.1",
+    "google-auth-library": "^10.1.0",
+    "googleapis": "^150.0.1",
+    "multiparty": "^4.2.3",
+    "nodemailer": "^7.0.4"
+  }
 }

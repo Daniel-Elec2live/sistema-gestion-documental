@@ -1,8 +1,6 @@
 {
   "name": "sistema-gestion-documental",
   "version": "1.0.0",
-  "description": "Sistema de gestión documental con Google Sheets y Drive",
-  "main": "index.js",
   "private": true,
   "dependencies": {
     "dotenv": "^16.5.0",
@@ -15,20 +13,14 @@
     "react-scripts": "^5.0.1"
   },
   "devDependencies": {
-    "netlify-cli": "^17.0.0",
-    "netlify-lambda": "^2.0.16"
+    "netlify-cli": "^17.0.0"
   },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
-    "dev": "netlify dev",
-    "build:functions": "netlify-lambda build functions",
-    "serve:functions": "netlify-lambda serve functions"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "dev": "netlify dev"
   },
   "eslintConfig": {
     "extends": [
