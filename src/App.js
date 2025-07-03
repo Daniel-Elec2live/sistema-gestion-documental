@@ -20,7 +20,7 @@ function App() {
 
   // Dashboard trabajador
   const [loginData, setLoginData] = useState({ dni: '', correo: '' });
-  const [folderStructure, setFolderStructure] = useState(null);
+  const [, setFolderStructure] = useState(null);
   const [workerInfo, setWorkerInfo] = useState(null);
   const [currentFolder, setCurrentFolder] = useState(null);
   const [navigationPath, setNavigationPath] = useState([]);

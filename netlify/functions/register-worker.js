@@ -334,13 +334,6 @@ function parseFormData(event) {
   return new Promise((resolve, reject) => {
     const form = new multiparty.Form();
     
-    // Simular request object para multiparty
-    const req = {
-      headers: event.headers,
-      body: event.body,
-      isBase64Encoded: event.isBase64Encoded
-    };
-
     // Convertir el body si viene en base64
     let bodyBuffer;
     if (event.isBase64Encoded) {
