@@ -2,6 +2,9 @@ const { GoogleAuth } = require('google-auth-library');
 const { google } = require('googleapis');
 const nodemailer = require('nodemailer');
 const multiparty = require('multiparty');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 require('dotenv').config();
 
@@ -71,6 +74,8 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile) 
   const uploadedFiles = {};
   
   try {
+    console.log('🔍 Iniciando subida de imágenes DNI...');
+    
     // Primero buscar la subcarpeta "Documentos Personales"
     let documentosPersonalesFolderId = null;
     
@@ -103,7 +108,8 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile) 
     }
     
     // Subir archivo DNI Delante
-    if (dniDelanteFile) {
+    if (dniDelanteFile && fs.existsSync(dniDelanteFile.path)) {
+      console.log('📤 Subiendo DNI Delante...');
       const dniDelanteResponse = await drive.files.create({
         resource: {
           name: `DNI_Delante_${dniDelanteFile.originalFilename || 'documento.jpg'}`,
@@ -111,7 +117,7 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile) 
         },
         media: {
           mimeType: dniDelanteFile.headers['content-type'] || 'image/jpeg',
-          body: require('fs').createReadStream(dniDelanteFile.path)
+          body: fs.createReadStream(dniDelanteFile.path)
         }
       });
       
@@ -120,7 +126,8 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile) 
     }
     
     // Subir archivo DNI Detrás
-    if (dniDetrasFile) {
+    if (dniDetrasFile && fs.existsSync(dniDetrasFile.path)) {
+      console.log('📤 Subiendo DNI Detrás...');
       const dniDetrasResponse = await drive.files.create({
         resource: {
           name: `DNI_Detras_${dniDetrasFile.originalFilename || 'documento.jpg'}`,
@@ -128,7 +135,7 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile) 
         },
         media: {
           mimeType: dniDetrasFile.headers['content-type'] || 'image/jpeg',
-          body: require('fs').createReadStream(dniDetrasFile.path)
+          body: fs.createReadStream(dniDetrasFile.path)
         }
       });
       
@@ -136,8 +143,10 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile) 
       console.log('DNI Detrás subido exitosamente a Documentos Personales');
     }
     
+    console.log('✅ Subida de imágenes DNI completada');
+    
   } catch (error) {
-    console.error('Error subiendo imágenes DNI:', error);
+    console.error('❌ Error subiendo imágenes DNI:', error);
     throw error;
   }
   
@@ -433,6 +442,8 @@ exports.handler = async (event, context) => {
     };
   }
 
+  let tempFilePaths = [];
+
   try {
     // Parsear FormData
     let formData;
@@ -550,6 +561,7 @@ exports.handler = async (event, context) => {
     const fechaIncorporacion = new Date().toLocaleDateString('es-ES');
 
     // 1. Crear carpeta en Google Drive
+    console.log('📁 Creando carpeta principal en Google Drive...');
     const carpetaMetadata = {
       name: `${nombre} - ${empresa}`,
       mimeType: 'application/vnd.google-apps.folder',
@@ -563,6 +575,7 @@ exports.handler = async (event, context) => {
 
     const carpetaId = carpetaResponse.data.id;
     const carpetaUrl = `https://drive.google.com/drive/folders/${carpetaId}`;
+    console.log('✅ Carpeta principal creada:', carpetaUrl);
 
     // Crear subcarpetas organizadas ANTES de subir los archivos DNI
     const subcarpetas = [
@@ -593,11 +606,8 @@ exports.handler = async (event, context) => {
     }
 
     // 2. Crear archivos temporales para subir a Google Drive
-    const fs = require('fs');
-    const path = require('path');
-    const os = require('os');
-
-    let tempFilePaths = [];
+    let dniUrls = {};
+    
     try {
       // Crear archivos temporales
       const dniDelantePath = path.join(os.tmpdir(), `dni_delante_${Date.now()}.jpg`);
@@ -622,9 +632,16 @@ exports.handler = async (event, context) => {
       };
 
       // Subir imágenes del DNI a Google Drive (ahora se subirán a "Documentos Personales")
-      const dniUrls = await uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile);
+      dniUrls = await uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile);
+      
+    } catch (uploadError) {
+      console.error('❌ Error en proceso de subida de DNI:', uploadError);
+      // Continuar aunque falle la subida
+    }
 
-      // 3. Añadir fila a Google Sheets
+    // 3. Añadir fila a Google Sheets
+    console.log('📊 Insertando datos en Google Sheets...');
+    try {
       const valores = [
         [
           nombre,                    // A: Nombre completo
@@ -654,60 +671,64 @@ exports.handler = async (event, context) => {
           values: valores
         }
       });
+      
+      console.log('✅ Datos insertados en Google Sheets exitosamente');
+      
+    } catch (sheetsError) {
+      console.error('❌ Error insertando en Google Sheets:', sheetsError);
+      // No terminar el proceso, continuar con el email
+    }
 
-      // 4. Enviar email de confirmación
-      console.log('🔔 Iniciando envío de email de confirmación...');
-      const emailResult = await sendConfirmationEmail(correo, nombre, empresa);
+    // 4. Enviar email de confirmación
+    console.log('📧 Iniciando envío de email de confirmación...');
+    let emailResult = { success: false };
+    
+    try {
+      emailResult = await sendConfirmationEmail(correo, nombre, empresa);
       
       if (emailResult.success) {
         console.log('✅ Email de confirmación enviado exitosamente:', emailResult.messageId);
       } else {
         console.log('⚠️ Email de confirmación no pudo ser enviado:', emailResult.error);
       }
-
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-          message: 'Trabajador registrado exitosamente',
-          idInterno,
-          carpetaUrl,
-          emailSent: emailResult.success,
-          emailDetails: emailResult.success ? {
-            messageId: emailResult.messageId,
-            status: 'enviado'
-          } : {
-            error: emailResult.error,
-            status: 'fallido'
-          },
-          dniUploaded: {
-            delante: !!dniUrls.dniDelanteUrl,
-            detras: !!dniUrls.dniDetrasUrl
-          },
-          details: {
-            nombre,
-            empresa,
-            correo,
-            fechaRegistro: fechaIncorporacion
-          }
-        })
-      };
-
-    } finally {
-      // Limpiar archivos temporales
-      tempFilePaths.forEach(filePath => {
-        try {
-          if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-          }
-        } catch (cleanupError) {
-          console.error('Error limpiando archivo temporal:', cleanupError);
-        }
-      });
+    } catch (emailError) {
+      console.error('❌ Error en proceso de envío de email:', emailError);
+      emailResult = { success: false, error: emailError.message };
     }
 
+    // 5. Devolver respuesta exitosa
+    console.log('🎉 Proceso de registro completado');
+    
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({
+        message: 'Trabajador registrado exitosamente',
+        idInterno,
+        carpetaUrl,
+        emailSent: emailResult.success,
+        emailDetails: emailResult.success ? {
+          messageId: emailResult.messageId,
+          status: 'enviado'
+        } : {
+          error: emailResult.error,
+          status: 'fallido'
+        },
+        dniUploaded: {
+          delante: !!dniUrls.dniDelanteUrl,
+          detras: !!dniUrls.dniDetrasUrl
+        },
+        details: {
+          nombre,
+          empresa,
+          correo,
+          fechaRegistro: fechaIncorporacion
+        }
+      })
+    };
+
   } catch (error) {
-    console.error('Error:', error);
+    console.error('❌ Error general en el proceso:', error);
     return {
       statusCode: 500,
       headers,
@@ -716,5 +737,18 @@ exports.handler = async (event, context) => {
         details: process.env.NODE_ENV === 'development' ? error.message : undefined
       })
     };
+  } finally {
+    // Limpiar archivos temporales
+    console.log('🧹 Limpiando archivos temporales...');
+    tempFilePaths.forEach(filePath => {
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          console.log(`✅ Archivo temporal eliminado: ${path.basename(filePath)}`);
+        }
+      } catch (cleanupError) {
+        console.error('Error limpiando archivo temporal:', cleanupError);
+      }
+    });
   }
 };
