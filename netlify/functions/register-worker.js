@@ -531,9 +531,8 @@ exports.handler = async (event, context) => {
 
     // 2. Crear subcarpetas y subir DNIs en PARALELO
     const subcarpetas = [
-      'Nóminas', 
-      'Contratos', 
-      'Documentos Personales',
+      'Nóminas',
+      'Contratos',
       'Formación',
       'Certificados'
     ];
