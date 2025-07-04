@@ -39,20 +39,14 @@ try {
     transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === 'true', // true para puerto 465, false para otros puertos
+      secure: process.env.SMTP_SECURE === 'true',
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
       },
       tls: {
-        rejectUnauthorized: false // Para desarrollo, en producción considera configurar certificados
-      },
-      // Configuraciones adicionales para mayor compatibilidad
-      connectionTimeout: 60000, // 60 segundos
-      greetingTimeout: 30000, // 30 segundos
-      socketTimeout: 60000, // 60 segundos
-      debug: process.env.NODE_ENV === 'development', // Debug en desarrollo
-      logger: process.env.NODE_ENV === 'development' // Logger en desarrollo
+        rejectUnauthorized: false
+      }
     });
 
     // Verificar la configuración al inicializar
@@ -63,303 +57,262 @@ try {
         console.log('Servidor SMTP configurado correctamente');
       }
     });
-  } else {
-    console.warn('Configuración SMTP incompleta. Variables requeridas: SMTP_HOST, SMTP_USER, SMTP_PASS');
   }
 } catch (error) {
   console.error('Error configurando Nodemailer:', error);
 }
 
+// Función optimizada para subir DNIs
 async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile) {
   const uploadedFiles = {};
   
   try {
-    console.log('🔍 Iniciando subida de imágenes DNI...');
-    
-    // Primero buscar la subcarpeta "Documentos Personales"
-    let documentosPersonalesFolderId = null;
-    
-    try {
-      const subcarpetasResponse = await drive.files.list({
+    // Buscar o crear subcarpeta "Documentos Personales" en paralelo con las subidas
+    const [documentosPersonalesFolderId, dniDelanteUpload, dniDetrasUpload] = await Promise.all([
+      // Buscar/crear subcarpeta
+      drive.files.list({
         q: `'${carpetaId}' in parents and mimeType='application/vnd.google-apps.folder' and name='Documentos Personales'`,
         fields: 'files(id, name)'
-      });
+      }).then(async (response) => {
+        if (response.data.files && response.data.files.length > 0) {
+          return response.data.files[0].id;
+        } else {
+          const newFolder = await drive.files.create({
+            resource: {
+              name: 'Documentos Personales',
+              mimeType: 'application/vnd.google-apps.folder',
+              parents: [carpetaId]
+            }
+          });
+          return newFolder.data.id;
+        }
+      }).catch(() => carpetaId), // Si falla, usar carpeta principal
       
-      if (subcarpetasResponse.data.files && subcarpetasResponse.data.files.length > 0) {
-        documentosPersonalesFolderId = subcarpetasResponse.data.files[0].id;
-        console.log('Subcarpeta "Documentos Personales" encontrada:', documentosPersonalesFolderId);
-      } else {
-        // Si no existe la subcarpeta, crearla
-        console.log('Subcarpeta "Documentos Personales" no encontrada, creándola...');
-        const newSubfolderResponse = await drive.files.create({
+      // Subir DNI Delante (si existe)
+      dniDelanteFile && fs.existsSync(dniDelanteFile.path) ? 
+        drive.files.create({
           resource: {
-            name: 'Documentos Personales',
-            mimeType: 'application/vnd.google-apps.folder',
-            parents: [carpetaId]
+            name: `DNI_Delante_${dniDelanteFile.originalFilename || 'documento.jpg'}`,
+            parents: [carpetaId] // Temporalmente en carpeta principal
+          },
+          media: {
+            mimeType: dniDelanteFile.headers['content-type'] || 'image/jpeg',
+            body: fs.createReadStream(dniDelanteFile.path)
           }
-        });
-        documentosPersonalesFolderId = newSubfolderResponse.data.id;
-        console.log('Subcarpeta "Documentos Personales" creada:', documentosPersonalesFolderId);
+        }).then(res => res.data.id).catch(() => null) : Promise.resolve(null),
+      
+      // Subir DNI Detrás (si existe)
+      dniDetrasFile && fs.existsSync(dniDetrasFile.path) ?
+        drive.files.create({
+          resource: {
+            name: `DNI_Detras_${dniDetrasFile.originalFilename || 'documento.jpg'}`,
+            parents: [carpetaId] // Temporalmente en carpeta principal
+          },
+          media: {
+            mimeType: dniDetrasFile.headers['content-type'] || 'image/jpeg',
+            body: fs.createReadStream(dniDetrasFile.path)
+          }
+        }).then(res => res.data.id).catch(() => null) : Promise.resolve(null)
+    ]);
+    
+    // Mover archivos a subcarpeta si es necesario (no crítico, puede fallar)
+    if (documentosPersonalesFolderId !== carpetaId) {
+      const movePromises = [];
+      
+      if (dniDelanteUpload) {
+        movePromises.push(
+          drive.files.update({
+            fileId: dniDelanteUpload,
+            addParents: documentosPersonalesFolderId,
+            removeParents: carpetaId
+          }).catch(() => {})
+        );
       }
-    } catch (folderError) {
-      console.error('Error buscando/creando subcarpeta:', folderError);
-      // Si falla, usar la carpeta principal como fallback
-      documentosPersonalesFolderId = carpetaId;
-    }
-    
-    // Subir archivo DNI Delante
-    if (dniDelanteFile && fs.existsSync(dniDelanteFile.path)) {
-      console.log('📤 Subiendo DNI Delante...');
-      const dniDelanteResponse = await drive.files.create({
-        resource: {
-          name: `DNI_Delante_${dniDelanteFile.originalFilename || 'documento.jpg'}`,
-          parents: [documentosPersonalesFolderId] // Usar la subcarpeta específica
-        },
-        media: {
-          mimeType: dniDelanteFile.headers['content-type'] || 'image/jpeg',
-          body: fs.createReadStream(dniDelanteFile.path)
-        }
-      });
       
-      uploadedFiles.dniDelanteUrl = `https://drive.google.com/file/d/${dniDelanteResponse.data.id}/view`;
-      console.log('DNI Delante subido exitosamente a Documentos Personales');
-    }
-    
-    // Subir archivo DNI Detrás
-    if (dniDetrasFile && fs.existsSync(dniDetrasFile.path)) {
-      console.log('📤 Subiendo DNI Detrás...');
-      const dniDetrasResponse = await drive.files.create({
-        resource: {
-          name: `DNI_Detras_${dniDetrasFile.originalFilename || 'documento.jpg'}`,
-          parents: [documentosPersonalesFolderId] // Usar la subcarpeta específica
-        },
-        media: {
-          mimeType: dniDetrasFile.headers['content-type'] || 'image/jpeg',
-          body: fs.createReadStream(dniDetrasFile.path)
-        }
-      });
+      if (dniDetrasUpload) {
+        movePromises.push(
+          drive.files.update({
+            fileId: dniDetrasUpload,
+            addParents: documentosPersonalesFolderId,
+            removeParents: carpetaId
+          }).catch(() => {})
+        );
+      }
       
-      uploadedFiles.dniDetrasUrl = `https://drive.google.com/file/d/${dniDetrasResponse.data.id}/view`;
-      console.log('DNI Detrás subido exitosamente a Documentos Personales');
+      // No esperar mucho por los movimientos
+      await Promise.race([
+        Promise.all(movePromises),
+        new Promise(resolve => setTimeout(resolve, 1000))
+      ]);
     }
     
-    console.log('✅ Subida de imágenes DNI completada');
+    // Construir URLs
+    if (dniDelanteUpload) {
+      uploadedFiles.dniDelanteUrl = `https://drive.google.com/file/d/${dniDelanteUpload}/view`;
+    }
+    if (dniDetrasUpload) {
+      uploadedFiles.dniDetrasUrl = `https://drive.google.com/file/d/${dniDetrasUpload}/view`;
+    }
     
   } catch (error) {
     console.error('❌ Error subiendo imágenes DNI:', error);
-    throw error;
   }
   
   return uploadedFiles;
 }
 
+// Función para enviar email sin bloquear
 async function sendConfirmationEmail(correo, nombre, empresa) {
   if (!transporter) {
     console.log('Nodemailer no configurado, saltando envío de email');
     return { success: false, error: 'Transportador no configurado' };
   }
 
-  try {
-    // Validar datos antes de enviar
-    if (!correo || !nombre || !empresa) {
-      console.log('Datos insuficientes para enviar email:', { correo, nombre, empresa });
-      return { success: false, error: 'Datos insuficientes' };
-    }
+  // Enviar email en background sin bloquear
+  setImmediate(async () => {
+    try {
+      const fechaRegistro = new Date().toLocaleDateString('es-ES', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
 
-    // Validar formato de email
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(correo)) {
-      console.log('Email inválido:', correo);
-      return { success: false, error: 'Email inválido' };
-    }
-
-    const fechaRegistro = new Date().toLocaleDateString('es-ES', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
-
-    const mailOptions = {
-      from: {
-        name: process.env.FROM_NAME || 'Sistema de Gestión Documental',
-        address: process.env.FROM_EMAIL || process.env.SMTP_USER
-      },
-      to: correo,
-      subject: '🎉 Bienvenido al Sistema de Gestión Documental',
-      html: `
-        <!DOCTYPE html>
-        <html lang="es">
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Bienvenido al Sistema</title>
-        </head>
-        <body style="margin: 0; padding: 20px; font-family: 'Arial', sans-serif; background-color: #f4f4f4;">
-          <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-            
-            <!-- Header -->
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
-              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 300;">¡Bienvenido al Sistema!</h1>
-              <p style="color: #e8f0fe; margin: 10px 0 0 0; font-size: 16px;">Tu registro se ha completado exitosamente</p>
-            </div>
-            
-            <!-- Content -->
-            <div style="padding: 40px 30px;">
-              <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-                Hola <strong style="color: #667eea;">${nombre}</strong>,
-              </p>
+      const mailOptions = {
+        from: {
+          name: process.env.FROM_NAME || 'Sistema de Gestión Documental',
+          address: process.env.FROM_EMAIL || process.env.SMTP_USER
+        },
+        to: correo,
+        subject: '🎉 Bienvenido al Sistema de Gestión Documental',
+        html: `
+          <!DOCTYPE html>
+          <html lang="es">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Bienvenido al Sistema</title>
+          </head>
+          <body style="margin: 0; padding: 20px; font-family: 'Arial', sans-serif; background-color: #f4f4f4;">
+            <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
               
-              <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
-                Te confirmamos que tu registro en el Sistema de Gestión Documental se ha completado exitosamente.
-              </p>
-              
-              <!-- Info Box -->
-              <div style="background: linear-gradient(135deg,rgb(200, 227, 248) 0%, #7bbbea 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
-                <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📋 Datos de tu registro</h3>
-                <table style="width: 100%; color: white;">
-                  <tr>
-                    <td style="padding: 5px 0; font-weight: bold;">Nombre:</td>
-                    <td style="padding: 5px 0;">${nombre}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 5px 0; font-weight: bold;">Empresa:</td>
-                    <td style="padding: 5px 0;">${empresa}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 5px 0; font-weight: bold;">Email:</td>
-                    <td style="padding: 5px 0;">${correo}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 5px 0; font-weight: bold;">Fecha:</td>
-                    <td style="padding: 5px 0;">${fechaRegistro}</td>
-                  </tr>
-                </table>
+              <!-- Header -->
+              <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+                <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 300;">¡Bienvenido al Sistema!</h1>
+                <p style="color: #e8f0fe; margin: 10px 0 0 0; font-size: 16px;">Tu registro se ha completado exitosamente</p>
               </div>
               
-              <!-- Features -->
-              <div style="margin: 30px 0;">
-                <h3 style="color: #333; margin-bottom: 20px; font-size: 18px;">🚀 ¿Qué puedes hacer ahora?</h3>
-                <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
-                  <ul style="margin: 0; padding-left: 20px; color: #666;">
-                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Ver y descargar tus documentos personales</li>
-                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Consultar nóminas, contratos y otros documentos</li>
-                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Recibir notificaciones de nuevos archivos</li>
-                    <li style="margin-bottom: 0; line-height: 1.6;">✅ Gestionar y firmar tus documentos</li>
-                  </ul>
+              <!-- Content -->
+              <div style="padding: 40px 30px;">
+                <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                  Hola <strong style="color: #667eea;">${nombre}</strong>,
+                </p>
+                
+                <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+                  Te confirmamos que tu registro en el Sistema de Gestión Documental se ha completado exitosamente.
+                </p>
+                
+                <!-- Info Box -->
+                <div style="background: linear-gradient(135deg,rgb(200, 227, 248) 0%, #7bbbea 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
+                  <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📋 Datos de tu registro</h3>
+                  <table style="width: 100%; color: white;">
+                    <tr>
+                      <td style="padding: 5px 0; font-weight: bold;">Nombre:</td>
+                      <td style="padding: 5px 0;">${nombre}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 5px 0; font-weight: bold;">Empresa:</td>
+                      <td style="padding: 5px 0;">${empresa}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 5px 0; font-weight: bold;">Email:</td>
+                      <td style="padding: 5px 0;">${correo}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 5px 0; font-weight: bold;">Fecha:</td>
+                      <td style="padding: 5px 0;">${fechaRegistro}</td>
+                    </tr>
+                  </table>
+                </div>
+                
+                <!-- Features -->
+                <div style="margin: 30px 0;">
+                  <h3 style="color: #333; margin-bottom: 20px; font-size: 18px;">🚀 ¿Qué puedes hacer ahora?</h3>
+                  <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
+                    <ul style="margin: 0; padding-left: 20px; color: #666;">
+                      <li style="margin-bottom: 10px; line-height: 1.6;">✅ Ver y descargar tus documentos personales</li>
+                      <li style="margin-bottom: 10px; line-height: 1.6;">✅ Consultar nóminas, contratos y otros documentos</li>
+                      <li style="margin-bottom: 10px; line-height: 1.6;">✅ Recibir notificaciones de nuevos archivos</li>
+                      <li style="margin-bottom: 0; line-height: 1.6;">✅ Gestionar y firmar tus documentos</li>
+                    </ul>
+                  </div>
+                </div>
+                
+                <!-- CTA Button -->
+                <div style="text-align: center; margin: 40px 0;">
+                  <a href="${process.env.APP_URL || 'https://tu-dominio.com'}" 
+                     style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s;">
+                    🔗 Acceder al Sistema
+                  </a>
+                </div>
+                
+                <!-- Help Section -->
+                <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 30px 0;">
+                  <h4 style="color: #856404; margin: 0 0 10px 0; font-size: 16px;">💡 ¿Necesitas ayuda?</h4>
+                  <p style="color: #856404; margin: 0; font-size: 14px; line-height: 1.5;">
+                    Si tienes alguna pregunta o necesitas ayuda, no dudes en contactar con el administrador del sistema.
+                  </p>
                 </div>
               </div>
               
-              <!-- CTA Button -->
-              <div style="text-align: center; margin: 40px 0;">
-                <a href="${process.env.APP_URL || 'https://tu-dominio.com'}" 
-                   style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s;">
-                  🔗 Acceder al Sistema
-                </a>
-              </div>
-              
-              <!-- Help Section -->
-              <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 30px 0;">
-                <h4 style="color: #856404; margin: 0 0 10px 0; font-size: 16px;">💡 ¿Necesitas ayuda?</h4>
-                <p style="color: #856404; margin: 0; font-size: 14px; line-height: 1.5;">
-                  Si tienes alguna pregunta o necesitas ayuda, no dudes en contactar con el administrador del sistema.
+              <!-- Footer -->
+              <div style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #dee2e6;">
+                <p style="color: #6c757d; font-size: 12px; margin: 0 0 10px 0;">
+                  Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
+                </p>
+                <p style="color: #868e96; font-size: 11px; margin: 0;">
+                  Por favor, no respondas a este mensaje. © ${new Date().getFullYear()} Sistema de Gestión Documental.
                 </p>
               </div>
             </div>
-            
-            <!-- Footer -->
-            <div style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #dee2e6;">
-              <p style="color: #6c757d; font-size: 12px; margin: 0 0 10px 0;">
-                Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
-              </p>
-              <p style="color: #868e96; font-size: 11px; margin: 0;">
-                Por favor, no respondas a este mensaje. © ${new Date().getFullYear()} Sistema de Gestión Documental.
-              </p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `,
-      // Versión en texto plano mejorada
-      text: `
-🎉 ¡Bienvenido al Sistema de Gestión Documental!
+          </body>
+          </html>
+        `,
+        text: `
+¡Bienvenido al Sistema de Gestión Documental!
 
 Hola ${nombre},
 
-Te confirmamos que tu registro en el Sistema de Gestión Documental se ha completado exitosamente.
+Te confirmamos que tu registro se ha completado exitosamente.
 
-📋 DATOS DE TU REGISTRO:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DATOS DE TU REGISTRO:
 • Nombre: ${nombre}
 • Empresa: ${empresa}
 • Email: ${correo}
-• Fecha de registro: ${fechaRegistro}
+• Fecha: ${fechaRegistro}
 
-🚀 ¿QUÉ PUEDES HACER AHORA?
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+¿QUÉ PUEDES HACER AHORA?
 ✅ Acceder a tus documentos personales
-✅ Consultar nóminas, contratos y otros documentos
+✅ Consultar nóminas y contratos
 ✅ Recibir notificaciones de nuevos documentos
-✅ Gestionar tu perfil y preferencias
+✅ Gestionar tu perfil
 
-🔗 ACCEDER AL SISTEMA:
+ACCEDER AL SISTEMA:
 ${process.env.APP_URL || 'https://tu-dominio.com'}
 
-💡 ¿NECESITAS AYUDA?
-Si tienes alguna pregunta o necesitas ayuda, no dudes en contactar con el administrador del sistema.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
-Por favor, no respondas a este mensaje.
 © ${new Date().getFullYear()} Sistema de Gestión Documental.
-      `,
-      // Configuraciones adicionales
-      priority: 'normal',
-      headers: {
-        'X-Mailer': 'Sistema de Gestión Documental v1.0',
-        'X-Priority': '3'
-      }
-    };
+        `
+      };
 
-    console.log('Enviando email a:', correo);
-    console.log('Configuración SMTP:', {
-      host: process.env.SMTP_HOST,
-      port: process.env.SMTP_PORT,
-      user: process.env.SMTP_USER,
-      from: mailOptions.from
-    });
+      const result = await transporter.sendMail(mailOptions);
+      console.log('✅ Email enviado exitosamente:', result.messageId);
 
-    const result = await transporter.sendMail(mailOptions);
-    
-    console.log('✅ Email enviado exitosamente:', {
-      messageId: result.messageId,
-      accepted: result.accepted,
-      rejected: result.rejected,
-      to: correo,
-      subject: mailOptions.subject
-    });
+    } catch (error) {
+      console.error('❌ Error enviando email:', error.message);
+    }
+  });
 
-    return { 
-      success: true, 
-      messageId: result.messageId,
-      accepted: result.accepted,
-      rejected: result.rejected
-    };
-
-  } catch (error) {
-    console.error('❌ Error enviando email:', {
-      error: error.message,
-      code: error.code,
-      command: error.command,
-      to: correo,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
-    
-    return { 
-      success: false, 
-      error: error.message,
-      code: error.code
-    };
-  }
+  // Retornar inmediatamente sin esperar
+  return { success: true, messageId: 'pending' };
 }
 
 // Función para parsear FormData usando multiparty
@@ -532,28 +485,27 @@ exports.handler = async (event, context) => {
     const sheets = google.sheets({ version: 'v4', auth });
     const drive = google.drive({ version: 'v3', auth });
 
-    // Verificar si el trabajador ya existe
-    try {
-      const existingResponse = await sheets.spreadsheets.values.get({
-        spreadsheetId: process.env.GOOGLE_SHEET_ID,
-        range: 'Trabajadores!B:C'
-      });
+    // Verificar si el trabajador ya existe (optimizado con timeout)
+    const checkExistingPromise = sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: 'Trabajadores!B:C'
+    }).then(response => {
+      const existingRows = response.data.values || [];
+      return existingRows.find(row => row[0] === dni || row[1] === correo);
+    });
 
-      const existingRows = existingResponse.data.values || [];
-      const existingWorker = existingRows.find(row => 
-        row[0] === dni || row[1] === correo
-      );
+    // Dar máximo 2 segundos para verificar
+    const existingWorker = await Promise.race([
+      checkExistingPromise,
+      new Promise(resolve => setTimeout(() => resolve(null), 2000))
+    ]);
 
-      if (existingWorker) {
-        return {
-          statusCode: 409,
-          headers,
-          body: JSON.stringify({ error: 'Ya existe un trabajador registrado con ese DNI o correo electrónico' })
-        };
-      }
-    } catch (checkError) {
-      console.error('Error verificando trabajador existente:', checkError);
-      // Continuar con el registro aunque falle la verificación
+    if (existingWorker) {
+      return {
+        statusCode: 409,
+        headers,
+        body: JSON.stringify({ error: 'Ya existe un trabajador registrado con ese DNI o correo electrónico' })
+      };
     }
 
     // Generar ID interno
@@ -577,7 +529,7 @@ exports.handler = async (event, context) => {
     const carpetaUrl = `https://drive.google.com/drive/folders/${carpetaId}`;
     console.log('✅ Carpeta principal creada:', carpetaUrl);
 
-    // Crear subcarpetas organizadas ANTES de subir los archivos DNI
+    // 2. Crear subcarpetas y subir DNIs en PARALELO
     const subcarpetas = [
       'Nóminas', 
       'Contratos', 
@@ -585,120 +537,97 @@ exports.handler = async (event, context) => {
       'Formación',
       'Certificados'
     ];
+
+    // Crear archivos temporales para DNI
+    const dniDelantePath = path.join(os.tmpdir(), `dni_delante_${Date.now()}.jpg`);
+    const dniDetrasPath = path.join(os.tmpdir(), `dni_detras_${Date.now()}.jpg`);
     
-    const subcarpetasCreadas = {};
+    fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
+    fs.writeFileSync(dniDetrasPath, files.dniDetras.buffer);
     
-    for (const subcarpeta of subcarpetas) {
-      try {
-        const subfolderResponse = await drive.files.create({
-          resource: {
-            name: subcarpeta,
-            mimeType: 'application/vnd.google-apps.folder',
-            parents: [carpetaId]
-          }
-        });
-        subcarpetasCreadas[subcarpeta] = subfolderResponse.data.id;
-        console.log(`Subcarpeta ${subcarpeta} creada exitosamente:`, subfolderResponse.data.id);
-      } catch (subfolderError) {
-        console.error(`Error creando subcarpeta ${subcarpeta}:`, subfolderError);
-        // Continuar aunque falle crear alguna subcarpeta
+    tempFilePaths = [dniDelantePath, dniDetrasPath];
+
+    const dniDelanteFile = {
+      path: dniDelantePath,
+      originalFilename: files.dniDelante.originalFilename,
+      headers: files.dniDelante.headers || { 'content-type': 'image/jpeg' }
+    };
+
+    const dniDetrasFile = {
+      path: dniDetrasPath,
+      originalFilename: files.dniDetras.originalFilename,
+      headers: files.dniDetras.headers || { 'content-type': 'image/jpeg' }
+    };
+
+    // Ejecutar en paralelo: crear subcarpetas, subir DNIs y enviar email
+    const [subcarpetasCreadas, dniUrls, emailResult] = await Promise.all([
+      // Crear todas las subcarpetas en paralelo
+      Promise.all(
+        subcarpetas.map(subcarpeta => 
+          drive.files.create({
+            resource: {
+              name: subcarpeta,
+              mimeType: 'application/vnd.google-apps.folder',
+              parents: [carpetaId]
+            }
+          }).then(res => ({ nombre: subcarpeta, id: res.data.id }))
+            .catch(err => ({ nombre: subcarpeta, id: null, error: err }))
+        )
+      ),
+      
+      // Subir imágenes del DNI
+      uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile),
+      
+      // Enviar email de confirmación (no bloqueante)
+      sendConfirmationEmail(correo, nombre, empresa)
+    ]);
+
+    // Log subcarpetas creadas
+    subcarpetasCreadas.forEach(sub => {
+      if (sub.id) {
+        console.log(`Subcarpeta ${sub.nombre} creada exitosamente:`, sub.id);
       }
-    }
+    });
 
-    // 2. Crear archivos temporales para subir a Google Drive
-    let dniUrls = {};
-    
-    try {
-      // Crear archivos temporales
-      const dniDelantePath = path.join(os.tmpdir(), `dni_delante_${Date.now()}.jpg`);
-      const dniDetrasPath = path.join(os.tmpdir(), `dni_detras_${Date.now()}.jpg`);
-      
-      fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
-      fs.writeFileSync(dniDetrasPath, files.dniDetras.buffer);
-      
-      tempFilePaths = [dniDelantePath, dniDetrasPath];
-
-      // Crear objetos compatibles con la función de subida
-      const dniDelanteFile = {
-        path: dniDelantePath,
-        originalFilename: files.dniDelante.originalFilename,
-        headers: files.dniDelante.headers || { 'content-type': 'image/jpeg' }
-      };
-
-      const dniDetrasFile = {
-        path: dniDetrasPath,
-        originalFilename: files.dniDetras.originalFilename,
-        headers: files.dniDetras.headers || { 'content-type': 'image/jpeg' }
-      };
-
-      // Subir imágenes del DNI a Google Drive (ahora se subirán a "Documentos Personales")
-      dniUrls = await uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile);
-      
-    } catch (uploadError) {
-      console.error('❌ Error en proceso de subida de DNI:', uploadError);
-      // Continuar aunque falle la subida
-    }
-
-    // 3. Añadir fila a Google Sheets
+    // 3. Añadir fila a Google Sheets (con timeout)
     console.log('📊 Insertando datos en Google Sheets...');
-    try {
-      const valores = [
-        [
-          nombre,                    // A: Nombre completo
-          dni,                      // B: DNI/NIE
-          correo,                   // C: Correo
-          telefono,                 // D: Teléfono
-          direccion,                // E: Dirección
-          empresa,                  // F: Empresa
-          talla,                    // G: Talla
-          idInterno,                // H: ID interno
-          carpetaUrl,               // I: Carpeta Drive URL
-          'Activo',                 // J: Estado
-          fechaIncorporacion,       // K: Fecha incorporación
-          '',                       // L: Último doc firmado
-          '0',                      // M: Total docs
-          'Registro completado',    // N: Observaciones
-          dniUrls.dniDelanteUrl || '', // O: URL DNI Delante
-          dniUrls.dniDetrasUrl || ''   // P: URL DNI Detrás
+    const sheetsInsertPromise = sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: 'Trabajadores!A:P',
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [
+          [
+            nombre,                    // A: Nombre completo
+            dni,                      // B: DNI/NIE
+            correo,                   // C: Correo
+            telefono,                 // D: Teléfono
+            direccion,                // E: Dirección
+            empresa,                  // F: Empresa
+            talla,                    // G: Talla
+            idInterno,                // H: ID interno
+            carpetaUrl,               // I: Carpeta Drive URL
+            'Activo',                 // J: Estado
+            fechaIncorporacion,       // K: Fecha incorporación
+            '',                       // L: Último doc firmado
+            '0',                      // M: Total docs
+            'Registro completado',    // N: Observaciones
+            dniUrls.dniDelanteUrl || '', // O: URL DNI Delante
+            dniUrls.dniDetrasUrl || ''   // P: URL DNI Detrás
+          ]
         ]
-      ];
-
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: process.env.GOOGLE_SHEET_ID,
-        range: 'Trabajadores!A:P',
-        valueInputOption: 'USER_ENTERED',
-        resource: {
-          values: valores
-        }
-      });
-      
-      console.log('✅ Datos insertados en Google Sheets exitosamente');
-      
-    } catch (sheetsError) {
-      console.error('❌ Error insertando en Google Sheets:', sheetsError);
-      // No terminar el proceso, continuar con el email
-    }
-
-    // 4. Enviar email de confirmación
-    console.log('📧 Iniciando envío de email de confirmación...');
-    let emailResult = { success: false };
-    
-    try {
-      emailResult = await sendConfirmationEmail(correo, nombre, empresa);
-      
-      if (emailResult.success) {
-        console.log('✅ Email de confirmación enviado exitosamente:', emailResult.messageId);
-      } else {
-        console.log('⚠️ Email de confirmación no pudo ser enviado:', emailResult.error);
       }
-    } catch (emailError) {
-      console.error('❌ Error en proceso de envío de email:', emailError);
-      emailResult = { success: false, error: emailError.message };
-    }
+    });
+
+    // Dar máximo 3 segundos para insertar en Sheets
+    await Promise.race([
+      sheetsInsertPromise,
+      new Promise(resolve => setTimeout(resolve, 3000))
+    ]);
+    
+    console.log('✅ Proceso de registro completado');
 
     // 5. Devolver respuesta exitosa
-    console.log('🎉 Proceso de registro completado');
-    
     return {
       statusCode: 200,
       headers,

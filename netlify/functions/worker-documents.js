@@ -27,6 +27,10 @@ function processPrivateKey(key) {
   return processedKey;
 }
 
+// Cache simple en memoria para trabajadores
+const workerCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+
 exports.handler = async (event, context) => {
   // CORS headers
   const headers = {
@@ -55,6 +59,19 @@ exports.handler = async (event, context) => {
         statusCode: 400,
         headers,
         body: JSON.stringify({ error: 'DNI y correo son obligatorios' })
+      };
+    }
+
+    // Verificar cache
+    const cacheKey = `${dni}-${correo}`;
+    const cached = workerCache.get(cacheKey);
+    
+    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+      console.log('Devolviendo datos desde cache');
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify(cached.data)
       };
     }
 
@@ -109,8 +126,8 @@ exports.handler = async (event, context) => {
     const carpetaUrl = trabajadorRow[8]; // Columna I (Carpeta Drive URL)
     const carpetaId = carpetaUrl.split('/').pop();
 
-    // 2. Función para obtener documentos organizados por carpeta
-    async function getDocumentsFromFolder(folderId, folderName = 'Carpeta Principal') {
+    // 2. Función optimizada para obtener documentos (sin recursión profunda)
+    async function getDocumentsFromFolder(folderId, folderName = 'Carpeta Principal', maxDepth = 1, currentDepth = 0) {
       const folderData = {
         nombre: folderName,
         documentos: [],
@@ -118,17 +135,33 @@ exports.handler = async (event, context) => {
       };
       
       try {
-        // Obtener archivos de la carpeta actual (todos los tipos de archivo)
-        const filesResponse = await drive.files.list({
-          q: `'${folderId}' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false`,
+        // Obtener todo en una sola llamada
+        const response = await drive.files.list({
+          q: `'${folderId}' in parents and trashed=false`,
           fields: 'files(id, name, createdTime, webViewLink, mimeType)',
-          orderBy: 'createdTime desc'
+          orderBy: 'name,createdTime desc',
+          pageSize: 100 // Limitar resultados
         });
 
-        // Procesar archivos encontrados
-        if (filesResponse.data.files) {
-          filesResponse.data.files.forEach(file => {
-            // Determinar el tipo de archivo
+        const files = response.data.files || [];
+        
+        // Separar archivos y carpetas
+        for (const file of files) {
+          if (file.mimeType === 'application/vnd.google-apps.folder') {
+            // Es una carpeta
+            if (currentDepth < maxDepth) {
+              // Solo procesar subcarpetas si no hemos alcanzado la profundidad máxima
+              const subfolderData = {
+                nombre: file.name,
+                documentos: [],
+                subcarpetas: [],
+                id: file.id,
+                hasContent: true // Marcador para carga bajo demanda
+              };
+              folderData.subcarpetas.push(subfolderData);
+            }
+          } else {
+            // Es un documento
             let tipoArchivo = 'Documento';
             if (file.mimeType.includes('pdf')) tipoArchivo = 'PDF';
             else if (file.mimeType.includes('image')) tipoArchivo = 'Imagen';
@@ -143,26 +176,26 @@ exports.handler = async (event, context) => {
               tipo: tipoArchivo,
               mimeType: file.mimeType
             });
-          });
-        }
-
-        // Obtener subcarpetas
-        const foldersResponse = await drive.files.list({
-          q: `'${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-          fields: 'files(id, name)',
-          orderBy: 'name'
-        });
-
-        // Procesar recursivamente cada subcarpeta
-        if (foldersResponse.data.files) {
-          for (const folder of foldersResponse.data.files) {
-            const subFolderData = await getDocumentsFromFolder(folder.id, folder.name);
-            // Solo incluir subcarpetas que tengan documentos o subcarpetas con contenido
-            if (subFolderData.documentos.length > 0 || subFolderData.subcarpetas.length > 0) {
-              folderData.subcarpetas.push(subFolderData);
-            }
           }
         }
+
+        // Procesar subcarpetas solo del primer nivel
+        if (currentDepth === 0 && folderData.subcarpetas.length > 0) {
+          // Procesar máximo 5 subcarpetas en paralelo para evitar timeout
+          const subcarpetasToProcess = folderData.subcarpetas.slice(0, 5);
+          
+          const subfolderPromises = subcarpetasToProcess.map(subfolder =>
+            getDocumentsFromFolder(subfolder.id, subfolder.nombre, maxDepth, currentDepth + 1)
+              .catch(err => {
+                console.error(`Error procesando subcarpeta ${subfolder.nombre}:`, err);
+                return subfolder; // Devolver la carpeta sin contenido si falla
+              })
+          );
+
+          const processedSubfolders = await Promise.all(subfolderPromises);
+          folderData.subcarpetas = processedSubfolders;
+        }
+
       } catch (error) {
         console.error(`Error procesando carpeta ${folderName}:`, error);
       }
@@ -170,57 +203,74 @@ exports.handler = async (event, context) => {
       return folderData;
     }
 
-    // 3. Obtener estructura completa de carpetas y documentos
-    const folderStructure = await getDocumentsFromFolder(carpetaId, 'Mis Documentos');
+    // 3. Obtener estructura de carpetas con profundidad limitada
+    const folderStructure = await getDocumentsFromFolder(carpetaId, 'Mis Documentos', 2);
 
-    // 4. Contar total de documentos (función recursiva)
+    // 4. Contar total de documentos (función recursiva optimizada)
     function countAllDocuments(folderData) {
       let total = folderData.documentos.length;
-      folderData.subcarpetas.forEach(subcarpeta => {
-        total += countAllDocuments(subcarpeta);
-      });
+      if (folderData.subcarpetas && folderData.subcarpetas.length > 0) {
+        for (const subcarpeta of folderData.subcarpetas) {
+          total += countAllDocuments(subcarpeta);
+        }
+      }
       return total;
     }
 
     const totalDocuments = countAllDocuments(folderStructure);
 
-    // 5. Actualizar total de documentos en la hoja
+    // 5. Actualizar total de documentos en la hoja (con timeout)
     const rowIndex = rows.findIndex(row => row[1] === dni && row[2] === correo) + 1;
     
-    try {
-      await sheets.spreadsheets.values.batchUpdate({
-        spreadsheetId: process.env.GOOGLE_SHEET_ID,
-        resource: {
-          valueInputOption: 'USER_ENTERED',
-          data: [
-            {
-              range: `Trabajadores!M${rowIndex}`, // Total docs
-              values: [[totalDocuments.toString()]]
-            }
-          ]
+    const updatePromise = sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      resource: {
+        valueInputOption: 'USER_ENTERED',
+        data: [
+          {
+            range: `Trabajadores!M${rowIndex}`, // Total docs
+            values: [[totalDocuments.toString()]]
+          }
+        ]
+      }
+    });
+
+    // No esperar más de 1 segundo por la actualización
+    await Promise.race([
+      updatePromise,
+      new Promise(resolve => setTimeout(resolve, 1000))
+    ]).catch(err => console.error('Error actualizando total docs:', err));
+
+    const responseData = {
+      folderStructure: folderStructure,
+      workerInfo: {
+        nombre: trabajadorRow[0],
+        empresa: trabajadorRow[5],
+        estado: trabajadorRow[9],
+        totalDocuments: totalDocuments,
+        dniUrls: {
+          delante: trabajadorRow[14] || null, // Columna O
+          detras: trabajadorRow[15] || null   // Columna P
         }
-      });
-    } catch (updateError) {
-      console.error('Error actualizando datos del trabajador:', updateError);
-      // Continuar aunque falle la actualización
+      }
+    };
+
+    // Guardar en cache
+    workerCache.set(cacheKey, {
+      timestamp: Date.now(),
+      data: responseData
+    });
+
+    // Limpiar cache antiguo si es muy grande
+    if (workerCache.size > 100) {
+      const oldestKey = workerCache.keys().next().value;
+      workerCache.delete(oldestKey);
     }
 
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({
-        folderStructure: folderStructure,
-        workerInfo: {
-          nombre: trabajadorRow[0],
-          empresa: trabajadorRow[5],
-          estado: trabajadorRow[9],
-          totalDocuments: totalDocuments,
-          dniUrls: {
-            delante: trabajadorRow[14] || null, // Columna O
-            detras: trabajadorRow[15] || null   // Columna P
-          }
-        }
-      })
+      body: JSON.stringify(responseData)
     };
 
   } catch (error) {
