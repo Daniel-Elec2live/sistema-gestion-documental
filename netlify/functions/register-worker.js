@@ -534,7 +534,8 @@ exports.handler = async (event, context) => {
       'Nóminas',
       'Contratos',
       'Formación',
-      'Certificados'
+      'Certificados',
+      'Pendiente de Firma'
     ];
 
     // Crear archivos temporales para DNI
