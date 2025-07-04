@@ -182,7 +182,7 @@ exports.handler = async (event, context) => {
         // Procesar subcarpetas solo del primer nivel
         if (currentDepth === 0 && folderData.subcarpetas.length > 0) {
           // Procesar máximo 5 subcarpetas en paralelo para evitar timeout
-          const subcarpetasToProcess = folderData.subcarpetas.slice(0, 5);
+          const subcarpetasToProcess = folderData.subcarpetas.slice(0, 6);
           
           const subfolderPromises = subcarpetasToProcess.map(subfolder =>
             getDocumentsFromFolder(subfolder.id, subfolder.nombre, maxDepth, currentDepth + 1)

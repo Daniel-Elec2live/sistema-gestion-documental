@@ -249,7 +249,7 @@ async function sendConfirmationEmail(correo, nombre, empresa) {
                 
                 <!-- CTA Button -->
                 <div style="text-align: center; margin: 40px 0;">
-                  <a href="${process.env.APP_URL || 'https://tu-dominio.com'}" 
+                  <a href="${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}" 
                      style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s;">
                     🔗 Acceder al Sistema
                   </a>
@@ -297,7 +297,7 @@ DATOS DE TU REGISTRO:
 ✅ Gestionar tu perfil
 
 ACCEDER AL SISTEMA:
-${process.env.APP_URL || 'https://tu-dominio.com'}
+${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}
 
 © ${new Date().getFullYear()} Sistema de Gestión Documental.
         `
