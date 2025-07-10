@@ -149,105 +149,96 @@ try {
   console.error('Error configurando Nodemailer:', error);
 }
 
-// Función optimizada para subir DNIs (ACTUALIZADA PARA SHARED DRIVES)
+// Función optimizada para subir DNIs directamente a la subcarpeta "Documentos Personales"
 async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, driveId = null) {
   const uploadedFiles = {};
   
   try {
-    // Buscar o crear subcarpeta "Documentos Personales" en paralelo con las subidas
-    const [documentosPersonalesFolderId, dniDelanteUpload, dniDetrasUpload] = await Promise.all([
-      // Buscar/crear subcarpeta
-      drive.files.list({
-        q: `'${carpetaId}' in parents and mimeType='application/vnd.google-apps.folder' and name='Documentos Personales'`,
-        fields: 'files(id, name)',
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true,
-        ...(driveId && { driveId })
-      }).then(async (response) => {
-        if (response.data.files && response.data.files.length > 0) {
-          return response.data.files[0].id;
-        } else {
-          const newFolder = await drive.files.create({
-            resource: {
-              name: 'Documentos Personales',
-              mimeType: 'application/vnd.google-apps.folder',
-              parents: [carpetaId]
-            },
-            supportsAllDrives: true
-          });
-          return newFolder.data.id;
-        }
-      }).catch(() => carpetaId), // Si falla, usar carpeta principal
-      
-      // Subir DNI Delante (si existe)
-      dniDelanteFile && fs.existsSync(dniDelanteFile.path) ? 
+    // Primero crear/buscar la subcarpeta "Documentos Personales"
+    console.log('📁 Creando/buscando subcarpeta "Documentos Personales"...');
+    
+    const documentosPersonalesFolder = await drive.files.list({
+      q: `'${carpetaId}' in parents and mimeType='application/vnd.google-apps.folder' and name='Documentos Personales'`,
+      fields: 'files(id, name)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      ...(driveId && { driveId })
+    });
+
+    let documentosPersonalesFolderId;
+    
+    if (documentosPersonalesFolder.data.files && documentosPersonalesFolder.data.files.length > 0) {
+      documentosPersonalesFolderId = documentosPersonalesFolder.data.files[0].id;
+      console.log('✅ Subcarpeta "Documentos Personales" encontrada:', documentosPersonalesFolderId);
+    } else {
+      // Crear la subcarpeta si no existe
+      const newFolder = await drive.files.create({
+        resource: {
+          name: 'Documentos Personales',
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [carpetaId]
+        },
+        supportsAllDrives: true
+      });
+      documentosPersonalesFolderId = newFolder.data.id;
+      console.log('✅ Subcarpeta "Documentos Personales" creada:', documentosPersonalesFolderId);
+    }
+
+    // Subir archivos DNI directamente a la subcarpeta "Documentos Personales"
+    const uploadPromises = [];
+    
+    // Subir DNI Delante
+    if (dniDelanteFile && fs.existsSync(dniDelanteFile.path)) {
+      uploadPromises.push(
         drive.files.create({
           resource: {
             name: `DNI_Delante_${dniDelanteFile.originalFilename || 'documento.jpg'}`,
-            parents: [carpetaId] // Temporalmente en carpeta principal
+            parents: [documentosPersonalesFolderId] // Directamente en la subcarpeta
           },
           media: {
             mimeType: dniDelanteFile.headers['content-type'] || 'image/jpeg',
             body: fs.createReadStream(dniDelanteFile.path)
           },
           supportsAllDrives: true
-        }).then(res => res.data.id).catch(() => null) : Promise.resolve(null),
-      
-      // Subir DNI Detrás (si existe)
-      dniDetrasFile && fs.existsSync(dniDetrasFile.path) ?
+        }).then(res => {
+          uploadedFiles.dniDelanteUrl = `https://drive.google.com/file/d/${res.data.id}/view`;
+          console.log('✅ DNI Delante subido:', res.data.id);
+          return res.data.id;
+        }).catch(err => {
+          console.error('❌ Error subiendo DNI Delante:', err);
+          return null;
+        })
+      );
+    }
+    
+    // Subir DNI Detrás
+    if (dniDetrasFile && fs.existsSync(dniDetrasFile.path)) {
+      uploadPromises.push(
         drive.files.create({
           resource: {
             name: `DNI_Detras_${dniDetrasFile.originalFilename || 'documento.jpg'}`,
-            parents: [carpetaId] // Temporalmente en carpeta principal
+            parents: [documentosPersonalesFolderId] // Directamente en la subcarpeta
           },
           media: {
             mimeType: dniDetrasFile.headers['content-type'] || 'image/jpeg',
             body: fs.createReadStream(dniDetrasFile.path)
           },
           supportsAllDrives: true
-        }).then(res => res.data.id).catch(() => null) : Promise.resolve(null)
-    ]);
+        }).then(res => {
+          uploadedFiles.dniDetrasUrl = `https://drive.google.com/file/d/${res.data.id}/view`;
+          console.log('✅ DNI Detrás subido:', res.data.id);
+          return res.data.id;
+        }).catch(err => {
+          console.error('❌ Error subiendo DNI Detrás:', err);
+          return null;
+        })
+      );
+    }
+
+    // Ejecutar subidas en paralelo
+    await Promise.all(uploadPromises);
     
-    // Mover archivos a subcarpeta si es necesario (no crítico, puede fallar)
-    if (documentosPersonalesFolderId !== carpetaId) {
-      const movePromises = [];
-      
-      if (dniDelanteUpload) {
-        movePromises.push(
-          drive.files.update({
-            fileId: dniDelanteUpload,
-            addParents: documentosPersonalesFolderId,
-            removeParents: carpetaId,
-            supportsAllDrives: true
-          }).catch(() => {})
-        );
-      }
-      
-      if (dniDetrasUpload) {
-        movePromises.push(
-          drive.files.update({
-            fileId: dniDetrasUpload,
-            addParents: documentosPersonalesFolderId,
-            removeParents: carpetaId,
-            supportsAllDrives: true
-          }).catch(() => {})
-        );
-      }
-      
-      // No esperar mucho por los movimientos
-      await Promise.race([
-        Promise.all(movePromises),
-        new Promise(resolve => setTimeout(resolve, 1000))
-      ]);
-    }
-    
-    // Construir URLs
-    if (dniDelanteUpload) {
-      uploadedFiles.dniDelanteUrl = `https://drive.google.com/file/d/${dniDelanteUpload}/view`;
-    }
-    if (dniDetrasUpload) {
-      uploadedFiles.dniDetrasUrl = `https://drive.google.com/file/d/${dniDetrasUpload}/view`;
-    }
+    console.log('✅ Documentos DNI subidos exitosamente a "Documentos Personales"');
     
   } catch (error) {
     console.error('❌ Error subiendo imágenes DNI:', error);
@@ -762,20 +753,22 @@ exports.handler = async (event, context) => {
     console.log('📊 Guardando datos en Google Sheets...');
     
     const rowData = [
-      idInterno,
-      dni,
-      correo,
-      nombre,
-      telefono,
-      direccion,
-      empresa,
-      talla,
-      fechaIncorporacion,
-      carpetaUrl,
-      dniUrls.dniDelanteUrl || '',
-      dniUrls.dniDetrasUrl || '',
-      'Activo',
-      new Date().toISOString()
+      nombre,                           // A: Nombre Completo
+      dni,                             // B: DNI/NIE
+      correo,                          // C: Correo Electrónico
+      telefono,                        // D: Teléfono
+      direccion,                       // E: Dirección Completa
+      empresa,                         // F: Empresa
+      talla,                           // G: Talla Ropa
+      idInterno,                       // H: ID Interno
+      carpetaUrl,                      // I: Carpeta Drive URL
+      'Activo',                        // J: Estado
+      fechaIncorporacion,              // K: Fecha Registro
+      '',                              // L: Último doc firmado
+      '0',                             // M: Total Docs
+      '',                              // N: Observaciones
+      dniUrls.dniDelanteUrl || '',     // O: DNI delantero
+      dniUrls.dniDetrasUrl || ''       // P: DNI trasero
     ];
 
     // Intentar guardar en Google Sheets con timeout
@@ -784,7 +777,7 @@ exports.handler = async (event, context) => {
       await Promise.race([
         sheets.spreadsheets.values.append({
           spreadsheetId: process.env.GOOGLE_SHEET_ID,
-          range: 'Trabajadores!A:N',
+          range: 'Trabajadores!A:P',
           valueInputOption: 'USER_ENTERED',
           resource: {
             values: [rowData]
