@@ -81,8 +81,8 @@ async function grantWorkerAccess(drive, carpetaId, workerEmail, accessLevel = 'r
   }
 }
 
-// Función para dar acceso a todas las subcarpetas
-async function grantWorkerAccessToAllFolders(drive, carpetaId, subcarpetasIds, workerEmail) {
+// Función para dar acceso a todas las subcarpetas (MEJORADA - incluye carpeta de DNIs)
+async function grantWorkerAccessToAllFolders(drive, carpetaId, subcarpetasIds, workerEmail, documentosPersonalesId = null) {
   const permissions = [];
   
   try {
@@ -106,6 +106,23 @@ async function grantWorkerAccessToAllFolders(drive, carpetaId, subcarpetasIds, w
       }
       return null;
     });
+
+    // Agregar acceso a "Documentos Personales" si se creó
+    if (documentosPersonalesId) {
+      subfolderPromises.push(
+        grantWorkerAccess(drive, documentosPersonalesId, workerEmail, 'reader')
+          .then(permission => {
+            if (permission) {
+              return { folderId: documentosPersonalesId, permissionId: permission.id, type: 'subfolder', name: 'Documentos Personales' };
+            }
+            return null;
+          })
+          .catch(error => {
+            console.error('Error dando acceso a carpeta Documentos Personales:', error);
+            return null;
+          })
+      );
+    }
 
     const subfolderPermissions = await Promise.all(subfolderPromises);
     permissions.push(...subfolderPermissions.filter(p => p !== null));
@@ -149,7 +166,7 @@ try {
   console.error('Error configurando Nodemailer:', error);
 }
 
-// Función CORREGIDA para subir DNIs con manejo correcto de Shared Drives
+// Función CORREGIDA para subir DNIs - RETORNA ID de la carpeta creada
 async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, driveId = null) {
   const uploadedFiles = {};
   
@@ -194,6 +211,9 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, 
       documentosPersonalesFolderId = newFolder.data.id;
       console.log('✅ Subcarpeta "Documentos Personales" creada:', documentosPersonalesFolderId);
     }
+
+    // Guardar el ID de la carpeta en el resultado
+    uploadedFiles.documentosPersonalesFolderId = documentosPersonalesFolderId;
 
     // Subir archivos DNI en paralelo
     const uploadPromises = [];
@@ -268,6 +288,7 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, 
     console.log('📋 Resumen de archivos subidos:', {
       dniDelante: !!uploadedFiles.dniDelanteUrl,
       dniDetras: !!uploadedFiles.dniDetrasUrl,
+      carpetaDocumentosPersonales: documentosPersonalesFolderId,
       urls: {
         delante: uploadedFiles.dniDelanteUrl,
         detras: uploadedFiles.dniDetrasUrl
@@ -701,15 +722,15 @@ exports.handler = async (event, context) => {
     const carpetaUrl = `https://drive.google.com/drive/folders/${carpetaId}`;
     console.log('✅ Carpeta principal creada:', carpetaUrl);
 
-    // 3. CREAR SUBCARPETAS CON SOPORTE PARA SHARED DRIVES
+    // 3. CREAR SUBCARPETAS SIN "Documentos Personales" (se crea al subir DNIs)
     const subcarpetas = [
       'Nóminas',
       'Contratos',
       'Formación',
       'Certificados',
-      'Documentos Personales',
       'Pendiente de Firma'
     ];
+    // NOTA: "Documentos Personales" se eliminó del array - se crea automáticamente al subir DNIs
 
     // CREAR ARCHIVOS TEMPORALES PARA DNI ANTES DE PROCESAR
     console.log('💾 Creando archivos temporales para DNI...');
@@ -749,7 +770,7 @@ exports.handler = async (event, context) => {
     console.log('🚀 Ejecutando procesos en paralelo...');
     
     const [subcarpetasCreadas, dniUrls] = await Promise.all([
-      // Crear todas las subcarpetas en paralelo CON SOPORTE PARA SHARED DRIVES
+      // Crear subcarpetas (SIN "Documentos Personales")
       Promise.all(
         subcarpetas.map(subcarpeta => 
           drive.files.create({
@@ -764,22 +785,27 @@ exports.handler = async (event, context) => {
         )
       ),
       
-      // Subir imágenes del DNI (pasando el driveId si existe)
+      // Subir imágenes del DNI (ESTO CREA la carpeta "Documentos Personales")
       uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, parentFolderInfo.driveId)
     ]);
 
     // 5. ENVIAR EMAIL DE CONFIRMACIÓN (EN PARALELO, NO BLOQUEANTE)
     const emailPromise = sendConfirmationEmail(correo, nombre, empresa, carpetaUrl);
 
-    // 6. CONFIGURAR PERMISOS DE ACCESO PARA EL TRABAJADOR
+    // 6. CONFIGURAR PERMISOS DE ACCESO PARA EL TRABAJADOR (INCLUYENDO DOCUMENTOS PERSONALES)
     console.log('🔐 Configurando permisos de acceso para el trabajador...');
     
-    // Dar acceso en paralelo (sin bloquear si falla)
-    const accessPromise = grantWorkerAccessToAllFolders(drive, carpetaId, subcarpetasCreadas, correo)
-      .catch(error => {
-        console.error('❌ Error configurando permisos:', error);
-        return []; // Retornar array vacío si falla
-      });
+    // Dar acceso en paralelo, incluyendo la carpeta de Documentos Personales si se creó
+    const accessPromise = grantWorkerAccessToAllFolders(
+      drive, 
+      carpetaId, 
+      subcarpetasCreadas, 
+      correo,
+      dniUrls.documentosPersonalesFolderId // Pasar el ID de la carpeta creada
+    ).catch(error => {
+      console.error('❌ Error configurando permisos:', error);
+      return []; // Retornar array vacío si falla
+    });
 
     // No esperar más de 5 segundos por los permisos
     const workerPermissions = await Promise.race([
@@ -799,12 +825,18 @@ exports.handler = async (event, context) => {
       }
     });
 
+    // Log carpeta Documentos Personales creada
+    if (dniUrls.documentosPersonalesFolderId) {
+      console.log(`✅ Subcarpeta "Documentos Personales" creada al subir DNIs:`, dniUrls.documentosPersonalesFolderId);
+    }
+
     // Log DNIs subidos
     console.log('📋 Resultado subida DNIs:', {
       delante: !!dniUrls.dniDelanteUrl,
       detras: !!dniUrls.dniDetrasUrl,
       delanteUrl: dniUrls.dniDelanteUrl,
       detrasUrl: dniUrls.dniDetrasUrl,
+      carpetaDocumentosPersonales: dniUrls.documentosPersonalesFolderId,
       errors: {
         delante: dniUrls.dniDelanteError,
         detras: dniUrls.dniDetrasError,
@@ -814,7 +846,7 @@ exports.handler = async (event, context) => {
 
     // Log permisos otorgados
     if (workerPermissions.length > 0) {
-      console.log(`✅ Permisos otorgados al trabajador: ${workerPermissions.length} carpetas`);
+      console.log(`✅ Permisos otorgados al trabajador: ${workerPermissions.length} carpetas (incluyendo Documentos Personales)`);
     } else {
       console.warn('⚠️ No se pudieron otorgar permisos al trabajador (continuando...)');
     }
@@ -866,6 +898,16 @@ exports.handler = async (event, context) => {
     // 8. DEVOLVER RESPUESTA EXITOSA
     console.log(`🎉 Registro completado exitosamente para: ${nombre}`);
     
+    // Agregar la carpeta Documentos Personales a la lista de subcarpetas para la respuesta
+    const allSubcarpetas = [...subcarpetasCreadas];
+    if (dniUrls.documentosPersonalesFolderId) {
+      allSubcarpetas.push({
+        nombre: 'Documentos Personales',
+        id: dniUrls.documentosPersonalesFolderId,
+        created: true
+      });
+    }
+    
     return {
       statusCode: 200,
       headers,
@@ -893,6 +935,7 @@ exports.handler = async (event, context) => {
           detras: !!dniUrls.dniDetrasUrl,
           delanteUrl: dniUrls.dniDelanteUrl,
           detrasUrl: dniUrls.dniDetrasUrl,
+          carpetaDocumentosPersonales: dniUrls.documentosPersonalesFolderId,
           uploadErrors: {
             delante: dniUrls.dniDelanteError,
             detras: dniUrls.dniDetrasError,
@@ -900,7 +943,7 @@ exports.handler = async (event, context) => {
           }
         },
         sheetsSaved,
-        subcarpetas: subcarpetasCreadas.map(s => ({
+        subcarpetas: allSubcarpetas.map(s => ({
           nombre: s.nombre,
           created: !!s.id,
           id: s.id

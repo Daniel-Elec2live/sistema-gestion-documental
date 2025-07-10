@@ -22,14 +22,10 @@ function App() {
   // Dashboard trabajador
   const [loginData, setLoginData] = useState({ dni: '', correo: '' });
   const [folderStructure, setFolderStructure] = useState(null);
-  const [folderSummary, setFolderSummary] = useState(null);
-  const [statistics, setStatistics] = useState(null);
-  const [recentDocuments, setRecentDocuments] = useState([]);
   const [workerInfo, setWorkerInfo] = useState(null);
   const [currentFolder, setCurrentFolder] = useState(null);
   const [navigationPath, setNavigationPath] = useState([]);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [viewMode, setViewMode] = useState('summary'); // 'summary', 'navigation'
 
   // Auto-ocultar mensajes después de 5 segundos
   useEffect(() => {
@@ -159,16 +155,11 @@ function App() {
       console.log('Respuesta del servidor:', result);
 
       if (response.ok) {
-        // Establecer todos los datos de la nueva estructura
         setFolderStructure(result.folderStructure);
-        setFolderSummary(result.folderSummary);
-        setStatistics(result.statistics);
-        setRecentDocuments(result.recentDocuments);
         setWorkerInfo(result.workerInfo);
         setCurrentFolder(result.folderStructure);
         setNavigationPath([{ nombre: result.folderStructure.nombre, folder: result.folderStructure }]);
         setIsLoggedIn(true);
-        setViewMode('summary'); // Empezar en vista de resumen
         setMessage('✅ Acceso exitoso');
       } else {
         setMessage(`❌ ${result.error || 'Error al acceder'}`);
@@ -184,32 +175,6 @@ function App() {
   const navigateToFolder = (folder) => {
     setCurrentFolder(folder);
     setNavigationPath(prev => [...prev, { nombre: folder.nombre, folder: folder }]);
-    setViewMode('navigation');
-  };
-
-  const navigateToFolderById = (folderId, folderName) => {
-    // Buscar la carpeta en la estructura por ID
-    const findFolderById = (folderData, targetId) => {
-      if (folderData.id === targetId) return folderData;
-      
-      if (folderData.subcarpetas) {
-        for (const subcarpeta of folderData.subcarpetas) {
-          const found = findFolderById(subcarpeta, targetId);
-          if (found) return found;
-        }
-      }
-      return null;
-    };
-
-    const targetFolder = findFolderById(folderStructure, folderId);
-    if (targetFolder) {
-      setCurrentFolder(targetFolder);
-      setNavigationPath([
-        { nombre: folderStructure.nombre, folder: folderStructure },
-        { nombre: targetFolder.nombre, folder: targetFolder }
-      ]);
-      setViewMode('navigation');
-    }
   };
 
   const navigateToPath = (index) => {
@@ -223,22 +188,16 @@ function App() {
       const newPath = navigationPath.slice(0, -1);
       setNavigationPath(newPath);
       setCurrentFolder(newPath[newPath.length - 1].folder);
-    } else {
-      setViewMode('summary');
     }
   };
 
   const logout = () => {
     setIsLoggedIn(false);
     setFolderStructure(null);
-    setFolderSummary(null);
-    setStatistics(null);
-    setRecentDocuments([]);
     setWorkerInfo(null);
     setCurrentFolder(null);
     setNavigationPath([]);
     setLoginData({ dni: '', correo: '' });
-    setViewMode('summary');
     setMessage('');
   };
 
@@ -261,121 +220,19 @@ function App() {
     );
   };
 
-  const renderSummaryView = () => {
-    if (!folderSummary || !statistics) return null;
-
-    return (
-      <div className="summary-view">
-        <div className="summary-header">
-          <h3>📊 Resumen de Documentos</h3>
-          <div className="summary-stats">
-            <div className="stat-item">
-              <span className="stat-number">{statistics.documentosTotales}</span>
-              <span className="stat-label">Documentos totales</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-number">{statistics.carpetasConDocumentos}</span>
-              <span className="stat-label">Carpetas con documentos</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-number">{statistics.documentosRecientes}</span>
-              <span className="stat-label">Documentos recientes</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="folders-summary">
-          <h4>📁 Mis Carpetas</h4>
-          <div className="folders-grid">
-            {folderSummary.map((carpeta, index) => (
-              <div 
-                key={index} 
-                className={`folder-summary-item ${carpeta.isEmpty ? 'empty' : ''} ${carpeta.isMissing ? 'missing' : ''}`}
-                onClick={() => carpeta.id ? navigateToFolderById(carpeta.id, carpeta.nombre) : null}
-                style={{ cursor: carpeta.id ? 'pointer' : 'not-allowed' }}
-              >
-                <div className="folder-summary-header">
-                  <div className="folder-icon">
-                    {carpeta.isMissing ? '❌' : carpeta.isEmpty ? '📁' : '📂'}
-                  </div>
-                  <h4>{carpeta.nombre}</h4>
-                </div>
-                
-                <div className="folder-summary-info">
-                  <div className="document-count">
-                    <span className="count-number">{carpeta.totalDocumentos}</span>
-                    <span className="count-label">
-                      documento{carpeta.totalDocumentos !== 1 ? 's' : ''}
-                    </span>
-                  </div>
-                  
-                  {carpeta.documentosDirectos !== carpeta.totalDocumentos && (
-                    <div className="direct-count">
-                      ({carpeta.documentosDirectos} directo{carpeta.documentosDirectos !== 1 ? 's' : ''})
-                    </div>
-                  )}
-                </div>
-
-                <div className="folder-summary-status">
-                  {carpeta.isMissing && (
-                    <span className="status-badge missing">No encontrada</span>
-                  )}
-                  {carpeta.isEmpty && !carpeta.isMissing && (
-                    <span className="status-badge empty">Vacía</span>
-                  )}
-                  {!carpeta.isEmpty && !carpeta.isMissing && (
-                    <span className="status-badge active">Con documentos</span>
-                  )}
-                </div>
-
-                {carpeta.ultimoDocumento && (
-                  <div className="last-document">
-                    <small>Último: {carpeta.ultimoDocumento.nombre}</small>
-                  </div>
-                )}
-
-                {carpeta.id && !carpeta.isMissing && (
-                  <div className="folder-summary-arrow">→</div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {recentDocuments && recentDocuments.length > 0 && (
-          <div className="recent-documents">
-            <h4>📄 Documentos Recientes</h4>
-            <div className="recent-documents-list">
-              {recentDocuments.slice(0, 5).map((doc, index) => (
-                <div key={index} className="recent-document-item">
-                  <div className="recent-doc-info">
-                    <h5>{doc.nombre}</h5>
-                    <p>
-                      <span className="doc-folder">📁 {doc.carpeta}</span>
-                      <span className="doc-date">📅 {doc.fechaModificacion}</span>
-                    </p>
-                    <p>
-                      <span className="doc-type">{doc.tipo}</span>
-                      <span className={`status ${doc.estado.toLowerCase()}`}>{doc.estado}</span>
-                    </p>
-                  </div>
-                  {doc.url && (
-                    <a href={doc.url} target="_blank" rel="noopener noreferrer" className="view-btn">
-                      Ver
-                    </a>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
-
   const renderFolderView = () => {
-    if (!currentFolder) return null;
+    if (!currentFolder) {
+      return (
+        <div className="loading-message">
+          <p>Cargando estructura de carpetas...</p>
+        </div>
+      );
+    }
 
+    console.log('Renderizando carpeta actual:', currentFolder);
+    console.log('Subcarpetas disponibles:', currentFolder.subcarpetas);
+
+    // CAMBIO CRÍTICO: Verificar subcarpetas de manera más permisiva
     const hasSubfolders = currentFolder.subcarpetas && currentFolder.subcarpetas.length > 0;
     const hasDocuments = currentFolder.documentos && currentFolder.documentos.length > 0;
 
@@ -383,16 +240,22 @@ function App() {
       <div className="folder-view">
         <div className="folder-navigation">
           {renderBreadcrumb()}
-          <div className="navigation-actions">
-            {navigationPath.length > 1 && (
-              <button onClick={goBack} className="back-btn">
-                ← Volver
-              </button>
-            )}
-            <button onClick={() => setViewMode('summary')} className="summary-btn">
-              📊 Vista Resumen
+          {navigationPath.length > 1 && (
+            <button onClick={goBack} className="back-btn">
+              ← Volver
             </button>
-          </div>
+          )}
+        </div>
+
+        {/* MOSTRAR INFORMACIÓN DE DEBUG */}
+        <div style={{ margin: '10px 0', padding: '10px', backgroundColor: '#f0f0f0', borderRadius: '5px', fontSize: '12px' }}>
+          <strong>Debug Info:</strong><br/>
+          Carpeta actual: {currentFolder.nombre}<br/>
+          Subcarpetas encontradas: {currentFolder.subcarpetas ? currentFolder.subcarpetas.length : 0}<br/>
+          Documentos encontrados: {currentFolder.documentos ? currentFolder.documentos.length : 0}<br/>
+          {currentFolder.subcarpetas && currentFolder.subcarpetas.length > 0 && (
+            <>Nombres de subcarpetas: {currentFolder.subcarpetas.map(s => s.nombre).join(', ')}</>
+          )}
         </div>
 
         {hasSubfolders && (
@@ -401,32 +264,37 @@ function App() {
             <div className="folders-grid">
               {currentFolder.subcarpetas.map((subfolder, index) => (
                 <div 
-                  key={index} 
-                  className={`folder-item ${subfolder.isEmpty ? 'empty' : ''} ${subfolder.isMissing ? 'missing' : ''}`}
-                  onClick={() => subfolder.id ? navigateToFolder(subfolder) : null}
+                  key={`folder-${index}-${subfolder.nombre}`}
+                  className={`folder-item ${!subfolder.id ? 'folder-empty' : ''}`}
+                  onClick={() => {
+                    if (subfolder.id) {
+                      navigateToFolder(subfolder);
+                    } else {
+                      setMessage(`⚠️ La carpeta "${subfolder.nombre}" está vacía o no existe aún.`);
+                    }
+                  }}
                   style={{ cursor: subfolder.id ? 'pointer' : 'not-allowed' }}
                 >
                   <div className="folder-icon">
-                    {subfolder.isMissing ? '❌' : subfolder.isEmpty ? '📁' : '📂'}
+                    {subfolder.id ? '📂' : '📁'}
                   </div>
                   <div className="folder-info">
                     <h4>{subfolder.nombre}</h4>
                     <p>
-                      {subfolder.totalDocumentos || 0} documento{(subfolder.totalDocumentos || 0) !== 1 ? 's' : ''}
+                      {subfolder.documentos ? subfolder.documentos.length : 0} documento{(subfolder.documentos?.length || 0) !== 1 ? 's' : ''}
                       {subfolder.subcarpetas && subfolder.subcarpetas.length > 0 && 
                         ` • ${subfolder.subcarpetas.length} subcarpeta${subfolder.subcarpetas.length !== 1 ? 's' : ''}`
                       }
                     </p>
-                    {subfolder.isMissing && (
-                      <p className="folder-missing">Carpeta no encontrada en Drive</p>
-                    )}
-                    {subfolder.error && (
-                      <p className="folder-error">Error: {subfolder.error}</p>
+                    {!subfolder.id && (
+                      <p style={{ color: '#888', fontSize: '12px', fontStyle: 'italic' }}>
+                        Carpeta vacía
+                      </p>
                     )}
                   </div>
-                  {subfolder.id && !subfolder.isMissing && (
-                    <div className="folder-arrow">→</div>
-                  )}
+                  <div className="folder-arrow">
+                    {subfolder.id ? '→' : '∅'}
+                  </div>
                 </div>
               ))}
             </div>
@@ -438,7 +306,7 @@ function App() {
             <h3>📄 Documentos ({currentFolder.documentos.length})</h3>
             <div className="documents-list">
               {currentFolder.documentos.map((doc, index) => (
-                <div key={index} className="document-item">
+                <div key={`doc-${index}-${doc.id || index}`} className="document-item">
                   <div className="doc-info">
                     <h4>{doc.nombre}</h4>
                     <p>📅 Fecha: {doc.fecha}</p>
@@ -462,6 +330,9 @@ function App() {
             <div className="empty-folder-icon">📂</div>
             <h3>Carpeta vacía</h3>
             <p>Esta carpeta no contiene documentos ni subcarpetas.</p>
+            <p style={{ fontSize: '12px', color: '#666', marginTop: '10px' }}>
+              Debug: subcarpetas={currentFolder.subcarpetas?.length || 0}, documentos={currentFolder.documentos?.length || 0}
+            </p>
           </div>
         )}
       </div>
@@ -705,7 +576,7 @@ function App() {
             </div>
           </div>
           
-          {viewMode === 'summary' ? renderSummaryView() : renderFolderView()}
+          {renderFolderView()}
         </div>
       )}
 
