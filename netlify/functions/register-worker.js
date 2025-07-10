@@ -123,7 +123,7 @@ async function grantWorkerAccessToAllFolders(drive, carpetaId, subcarpetasIds, w
 let transporter;
 try {
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    transporter = nodemailer.createTransport({
+    transporter = nodemailer.createTransporter({
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT) || 587,
       secure: process.env.SMTP_SECURE === 'true',
@@ -149,11 +149,13 @@ try {
   console.error('Error configurando Nodemailer:', error);
 }
 
-// Función optimizada para subir DNIs directamente a la subcarpeta "Documentos Personales"
+// Función CORREGIDA para subir DNIs directamente a la subcarpeta "Documentos Personales"
 async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, driveId = null) {
   const uploadedFiles = {};
   
   try {
+    console.log('📋 Iniciando proceso de subida de DNIs...');
+    
     // Primero crear/buscar la subcarpeta "Documentos Personales"
     console.log('📁 Creando/buscando subcarpeta "Documentos Personales"...');
     
@@ -184,64 +186,75 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, 
       console.log('✅ Subcarpeta "Documentos Personales" creada:', documentosPersonalesFolderId);
     }
 
-    // Subir archivos DNI directamente a la subcarpeta "Documentos Personales"
-    const uploadPromises = [];
-    
-    // Subir DNI Delante
+    // Verificar que los archivos existen antes de intentar subirlos
     if (dniDelanteFile && fs.existsSync(dniDelanteFile.path)) {
-      uploadPromises.push(
-        drive.files.create({
+      console.log('📤 Subiendo DNI Delante...');
+      try {
+        const dniDelanteResponse = await drive.files.create({
           resource: {
-            name: `DNI_Delante_${dniDelanteFile.originalFilename || 'documento.jpg'}`,
-            parents: [documentosPersonalesFolderId] // Directamente en la subcarpeta
+            name: `DNI_Delante_${Date.now()}_${dniDelanteFile.originalFilename || 'documento.jpg'}`,
+            parents: [documentosPersonalesFolderId]
           },
           media: {
             mimeType: dniDelanteFile.headers['content-type'] || 'image/jpeg',
             body: fs.createReadStream(dniDelanteFile.path)
           },
           supportsAllDrives: true
-        }).then(res => {
-          uploadedFiles.dniDelanteUrl = `https://drive.google.com/file/d/${res.data.id}/view`;
-          console.log('✅ DNI Delante subido:', res.data.id);
-          return res.data.id;
-        }).catch(err => {
-          console.error('❌ Error subiendo DNI Delante:', err);
-          return null;
-        })
-      );
+        });
+        
+        uploadedFiles.dniDelanteUrl = `https://drive.google.com/file/d/${dniDelanteResponse.data.id}/view`;
+        uploadedFiles.dniDelanteId = dniDelanteResponse.data.id;
+        console.log('✅ DNI Delante subido exitosamente:', dniDelanteResponse.data.id);
+        
+      } catch (error) {
+        console.error('❌ Error subiendo DNI Delante:', error);
+        uploadedFiles.dniDelanteError = error.message;
+      }
+    } else {
+      console.warn('⚠️ Archivo DNI Delante no encontrado o no válido:', dniDelanteFile?.path);
     }
     
     // Subir DNI Detrás
     if (dniDetrasFile && fs.existsSync(dniDetrasFile.path)) {
-      uploadPromises.push(
-        drive.files.create({
+      console.log('📤 Subiendo DNI Detrás...');
+      try {
+        const dniDetrasResponse = await drive.files.create({
           resource: {
-            name: `DNI_Detras_${dniDetrasFile.originalFilename || 'documento.jpg'}`,
-            parents: [documentosPersonalesFolderId] // Directamente en la subcarpeta
+            name: `DNI_Detras_${Date.now()}_${dniDetrasFile.originalFilename || 'documento.jpg'}`,
+            parents: [documentosPersonalesFolderId]
           },
           media: {
             mimeType: dniDetrasFile.headers['content-type'] || 'image/jpeg',
             body: fs.createReadStream(dniDetrasFile.path)
           },
           supportsAllDrives: true
-        }).then(res => {
-          uploadedFiles.dniDetrasUrl = `https://drive.google.com/file/d/${res.data.id}/view`;
-          console.log('✅ DNI Detrás subido:', res.data.id);
-          return res.data.id;
-        }).catch(err => {
-          console.error('❌ Error subiendo DNI Detrás:', err);
-          return null;
-        })
-      );
+        });
+        
+        uploadedFiles.dniDetrasUrl = `https://drive.google.com/file/d/${dniDetrasResponse.data.id}/view`;
+        uploadedFiles.dniDetrasId = dniDetrasResponse.data.id;
+        console.log('✅ DNI Detrás subido exitosamente:', dniDetrasResponse.data.id);
+        
+      } catch (error) {
+        console.error('❌ Error subiendo DNI Detrás:', error);
+        uploadedFiles.dniDetrasError = error.message;
+      }
+    } else {
+      console.warn('⚠️ Archivo DNI Detrás no encontrado o no válido:', dniDetrasFile?.path);
     }
 
-    // Ejecutar subidas en paralelo
-    await Promise.all(uploadPromises);
-    
-    console.log('✅ Documentos DNI subidos exitosamente a "Documentos Personales"');
+    console.log('✅ Proceso de subida de DNIs completado');
+    console.log('📋 Resumen de archivos subidos:', {
+      dniDelante: !!uploadedFiles.dniDelanteUrl,
+      dniDetras: !!uploadedFiles.dniDetrasUrl,
+      urls: {
+        delante: uploadedFiles.dniDelanteUrl,
+        detras: uploadedFiles.dniDetrasUrl
+      }
+    });
     
   } catch (error) {
-    console.error('❌ Error subiendo imágenes DNI:', error);
+    console.error('❌ Error general subiendo imágenes DNI:', error);
+    uploadedFiles.generalError = error.message;
   }
   
   return uploadedFiles;
@@ -672,14 +685,25 @@ exports.handler = async (event, context) => {
       'Pendiente de Firma'
     ];
 
-    // Crear archivos temporales para DNI
-    const dniDelantePath = path.join(os.tmpdir(), `dni_delante_${Date.now()}.jpg`);
-    const dniDetrasPath = path.join(os.tmpdir(), `dni_detras_${Date.now()}.jpg`);
+    // CREAR ARCHIVOS TEMPORALES PARA DNI ANTES DE PROCESAR
+    console.log('💾 Creando archivos temporales para DNI...');
+    const timestamp = Date.now();
+    const dniDelantePath = path.join(os.tmpdir(), `dni_delante_${timestamp}.jpg`);
+    const dniDetrasPath = path.join(os.tmpdir(), `dni_detras_${timestamp}.jpg`);
     
+    // Escribir los buffers a archivos temporales
     fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
     fs.writeFileSync(dniDetrasPath, files.dniDetras.buffer);
     
+    // Agregar a la lista de archivos a limpiar
     tempFilePaths = [dniDelantePath, dniDetrasPath];
+    
+    console.log('✅ Archivos temporales creados:', {
+      delante: dniDelantePath,
+      detras: dniDetrasPath,
+      delanteExists: fs.existsSync(dniDelantePath),
+      detrasExists: fs.existsSync(dniDetrasPath)
+    });
 
     const dniDelanteFile = {
       path: dniDelantePath,
@@ -693,8 +717,10 @@ exports.handler = async (event, context) => {
       headers: files.dniDetras.headers || { 'content-type': 'image/jpeg' }
     };
 
-    // Ejecutar en paralelo: crear subcarpetas, subir DNIs y enviar email
-    const [subcarpetasCreadas, dniUrls, emailResult] = await Promise.all([
+    // 4. EJECUTAR PROCESOS EN PARALELO: crear subcarpetas y subir DNIs
+    console.log('🚀 Ejecutando procesos en paralelo...');
+    
+    const [subcarpetasCreadas, dniUrls] = await Promise.all([
       // Crear todas las subcarpetas en paralelo CON SOPORTE PARA SHARED DRIVES
       Promise.all(
         subcarpetas.map(subcarpeta => 
@@ -711,13 +737,13 @@ exports.handler = async (event, context) => {
       ),
       
       // Subir imágenes del DNI (pasando el driveId si existe)
-      uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, parentFolderInfo.driveId),
-      
-      // Enviar email de confirmación (no bloqueante)
-      sendConfirmationEmail(correo, nombre, empresa, carpetaUrl)
+      uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, parentFolderInfo.driveId)
     ]);
 
-    // 4. CONFIGURAR PERMISOS DE ACCESO PARA EL TRABAJADOR
+    // 5. ENVIAR EMAIL DE CONFIRMACIÓN (EN PARALELO, NO BLOQUEANTE)
+    const emailPromise = sendConfirmationEmail(correo, nombre, empresa, carpetaUrl);
+
+    // 6. CONFIGURAR PERMISOS DE ACCESO PARA EL TRABAJADOR
     console.log('🔐 Configurando permisos de acceso para el trabajador...');
     
     // Dar acceso en paralelo (sin bloquear si falla)
@@ -733,12 +759,28 @@ exports.handler = async (event, context) => {
       new Promise(resolve => setTimeout(() => resolve([]), 5000))
     ]);
 
+    // Esperar resultado del email
+    const emailResult = await emailPromise;
+
     // Log subcarpetas creadas
     subcarpetasCreadas.forEach(sub => {
       if (sub.id) {
         console.log(`✅ Subcarpeta ${sub.nombre} creada exitosamente:`, sub.id);
       } else {
         console.warn(`⚠️ Error creando subcarpeta ${sub.nombre}:`, sub.error);
+      }
+    });
+
+    // Log DNIs subidos
+    console.log('📋 Resultado subida DNIs:', {
+      delante: !!dniUrls.dniDelanteUrl,
+      detras: !!dniUrls.dniDetrasUrl,
+      delanteUrl: dniUrls.dniDelanteUrl,
+      detrasUrl: dniUrls.dniDetrasUrl,
+      errors: {
+        delante: dniUrls.dniDelanteError,
+        detras: dniUrls.dniDetrasError,
+        general: dniUrls.generalError
       }
     });
 
@@ -749,7 +791,7 @@ exports.handler = async (event, context) => {
       console.warn('⚠️ No se pudieron otorgar permisos al trabajador (continuando...)');
     }
 
-    // 5. GUARDAR DATOS EN GOOGLE SHEETS
+    // 7. GUARDAR DATOS EN GOOGLE SHEETS
     console.log('📊 Guardando datos en Google Sheets...');
     
     const rowData = [
@@ -793,7 +835,7 @@ exports.handler = async (event, context) => {
       console.log('⚠️ El registro se completó pero no se pudo guardar en la hoja de cálculo');
     }
 
-    // 6. DEVOLVER RESPUESTA EXITOSA
+    // 8. DEVOLVER RESPUESTA EXITOSA
     console.log(`🎉 Registro completado exitosamente para: ${nombre}`);
     
     return {
@@ -822,7 +864,12 @@ exports.handler = async (event, context) => {
           delante: !!dniUrls.dniDelanteUrl,
           detras: !!dniUrls.dniDetrasUrl,
           delanteUrl: dniUrls.dniDelanteUrl,
-          detrasUrl: dniUrls.dniDetrasUrl
+          detrasUrl: dniUrls.dniDetrasUrl,
+          uploadErrors: {
+            delante: dniUrls.dniDelanteError,
+            detras: dniUrls.dniDetrasError,
+            general: dniUrls.generalError
+          }
         },
         sheetsSaved,
         subcarpetas: subcarpetasCreadas.map(s => ({
@@ -840,7 +887,12 @@ exports.handler = async (event, context) => {
           talla,
           fechaRegistro: fechaIncorporacion,
           carpetaCreada: true,
-          permisosConfigurados: workerPermissions.length > 0
+          permisosConfigurados: workerPermissions.length > 0,
+          documentosSubidos: {
+            total: (dniUrls.dniDelanteUrl ? 1 : 0) + (dniUrls.dniDetrasUrl ? 1 : 0),
+            dniDelante: !!dniUrls.dniDelanteUrl,
+            dniDetras: !!dniUrls.dniDetrasUrl
+          }
         }
       })
     };
@@ -856,16 +908,20 @@ exports.handler = async (event, context) => {
       })
     };
   } finally {
-    // Limpiar archivos temporales
+    // Limpiar archivos temporales AL FINAL del proceso
+    console.log('🧹 Iniciando limpieza de archivos temporales...');
     tempFilePaths.forEach(filePath => {
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
           console.log(`🗑️ Archivo temporal eliminado: ${filePath}`);
+        } else {
+          console.log(`⚠️ Archivo temporal no encontrado para eliminar: ${filePath}`);
         }
       } catch (cleanupError) {
-        console.warn(`⚠️ No se pudo eliminar archivo temporal: ${filePath}`, cleanupError);
+        console.warn(`⚠️ No se pudo eliminar archivo temporal: ${filePath}`, cleanupError.message);
       }
     });
+    console.log('✅ Limpieza de archivos temporales completada');
   }
 };

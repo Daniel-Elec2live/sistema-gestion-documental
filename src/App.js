@@ -21,11 +21,15 @@ function App() {
 
   // Dashboard trabajador
   const [loginData, setLoginData] = useState({ dni: '', correo: '' });
-  const [, setFolderStructure] = useState(null);
+  const [folderStructure, setFolderStructure] = useState(null);
+  const [folderSummary, setFolderSummary] = useState(null);
+  const [statistics, setStatistics] = useState(null);
+  const [recentDocuments, setRecentDocuments] = useState([]);
   const [workerInfo, setWorkerInfo] = useState(null);
   const [currentFolder, setCurrentFolder] = useState(null);
   const [navigationPath, setNavigationPath] = useState([]);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [viewMode, setViewMode] = useState('summary'); // 'summary', 'navigation'
 
   // Auto-ocultar mensajes después de 5 segundos
   useEffect(() => {
@@ -155,11 +159,16 @@ function App() {
       console.log('Respuesta del servidor:', result);
 
       if (response.ok) {
+        // Establecer todos los datos de la nueva estructura
         setFolderStructure(result.folderStructure);
+        setFolderSummary(result.folderSummary);
+        setStatistics(result.statistics);
+        setRecentDocuments(result.recentDocuments);
         setWorkerInfo(result.workerInfo);
         setCurrentFolder(result.folderStructure);
         setNavigationPath([{ nombre: result.folderStructure.nombre, folder: result.folderStructure }]);
         setIsLoggedIn(true);
+        setViewMode('summary'); // Empezar en vista de resumen
         setMessage('✅ Acceso exitoso');
       } else {
         setMessage(`❌ ${result.error || 'Error al acceder'}`);
@@ -175,6 +184,32 @@ function App() {
   const navigateToFolder = (folder) => {
     setCurrentFolder(folder);
     setNavigationPath(prev => [...prev, { nombre: folder.nombre, folder: folder }]);
+    setViewMode('navigation');
+  };
+
+  const navigateToFolderById = (folderId, folderName) => {
+    // Buscar la carpeta en la estructura por ID
+    const findFolderById = (folderData, targetId) => {
+      if (folderData.id === targetId) return folderData;
+      
+      if (folderData.subcarpetas) {
+        for (const subcarpeta of folderData.subcarpetas) {
+          const found = findFolderById(subcarpeta, targetId);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+
+    const targetFolder = findFolderById(folderStructure, folderId);
+    if (targetFolder) {
+      setCurrentFolder(targetFolder);
+      setNavigationPath([
+        { nombre: folderStructure.nombre, folder: folderStructure },
+        { nombre: targetFolder.nombre, folder: targetFolder }
+      ]);
+      setViewMode('navigation');
+    }
   };
 
   const navigateToPath = (index) => {
@@ -188,16 +223,22 @@ function App() {
       const newPath = navigationPath.slice(0, -1);
       setNavigationPath(newPath);
       setCurrentFolder(newPath[newPath.length - 1].folder);
+    } else {
+      setViewMode('summary');
     }
   };
 
   const logout = () => {
     setIsLoggedIn(false);
     setFolderStructure(null);
+    setFolderSummary(null);
+    setStatistics(null);
+    setRecentDocuments([]);
     setWorkerInfo(null);
     setCurrentFolder(null);
     setNavigationPath([]);
     setLoginData({ dni: '', correo: '' });
+    setViewMode('summary');
     setMessage('');
   };
 
@@ -220,6 +261,118 @@ function App() {
     );
   };
 
+  const renderSummaryView = () => {
+    if (!folderSummary || !statistics) return null;
+
+    return (
+      <div className="summary-view">
+        <div className="summary-header">
+          <h3>📊 Resumen de Documentos</h3>
+          <div className="summary-stats">
+            <div className="stat-item">
+              <span className="stat-number">{statistics.documentosTotales}</span>
+              <span className="stat-label">Documentos totales</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-number">{statistics.carpetasConDocumentos}</span>
+              <span className="stat-label">Carpetas con documentos</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-number">{statistics.documentosRecientes}</span>
+              <span className="stat-label">Documentos recientes</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="folders-summary">
+          <h4>📁 Mis Carpetas</h4>
+          <div className="folders-grid">
+            {folderSummary.map((carpeta, index) => (
+              <div 
+                key={index} 
+                className={`folder-summary-item ${carpeta.isEmpty ? 'empty' : ''} ${carpeta.isMissing ? 'missing' : ''}`}
+                onClick={() => carpeta.id ? navigateToFolderById(carpeta.id, carpeta.nombre) : null}
+                style={{ cursor: carpeta.id ? 'pointer' : 'not-allowed' }}
+              >
+                <div className="folder-summary-header">
+                  <div className="folder-icon">
+                    {carpeta.isMissing ? '❌' : carpeta.isEmpty ? '📁' : '📂'}
+                  </div>
+                  <h4>{carpeta.nombre}</h4>
+                </div>
+                
+                <div className="folder-summary-info">
+                  <div className="document-count">
+                    <span className="count-number">{carpeta.totalDocumentos}</span>
+                    <span className="count-label">
+                      documento{carpeta.totalDocumentos !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  
+                  {carpeta.documentosDirectos !== carpeta.totalDocumentos && (
+                    <div className="direct-count">
+                      ({carpeta.documentosDirectos} directo{carpeta.documentosDirectos !== 1 ? 's' : ''})
+                    </div>
+                  )}
+                </div>
+
+                <div className="folder-summary-status">
+                  {carpeta.isMissing && (
+                    <span className="status-badge missing">No encontrada</span>
+                  )}
+                  {carpeta.isEmpty && !carpeta.isMissing && (
+                    <span className="status-badge empty">Vacía</span>
+                  )}
+                  {!carpeta.isEmpty && !carpeta.isMissing && (
+                    <span className="status-badge active">Con documentos</span>
+                  )}
+                </div>
+
+                {carpeta.ultimoDocumento && (
+                  <div className="last-document">
+                    <small>Último: {carpeta.ultimoDocumento.nombre}</small>
+                  </div>
+                )}
+
+                {carpeta.id && !carpeta.isMissing && (
+                  <div className="folder-summary-arrow">→</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {recentDocuments && recentDocuments.length > 0 && (
+          <div className="recent-documents">
+            <h4>📄 Documentos Recientes</h4>
+            <div className="recent-documents-list">
+              {recentDocuments.slice(0, 5).map((doc, index) => (
+                <div key={index} className="recent-document-item">
+                  <div className="recent-doc-info">
+                    <h5>{doc.nombre}</h5>
+                    <p>
+                      <span className="doc-folder">📁 {doc.carpeta}</span>
+                      <span className="doc-date">📅 {doc.fechaModificacion}</span>
+                    </p>
+                    <p>
+                      <span className="doc-type">{doc.tipo}</span>
+                      <span className={`status ${doc.estado.toLowerCase()}`}>{doc.estado}</span>
+                    </p>
+                  </div>
+                  {doc.url && (
+                    <a href={doc.url} target="_blank" rel="noopener noreferrer" className="view-btn">
+                      Ver
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderFolderView = () => {
     if (!currentFolder) return null;
 
@@ -230,34 +383,50 @@ function App() {
       <div className="folder-view">
         <div className="folder-navigation">
           {renderBreadcrumb()}
-          {navigationPath.length > 1 && (
-            <button onClick={goBack} className="back-btn">
-              ← Volver
+          <div className="navigation-actions">
+            {navigationPath.length > 1 && (
+              <button onClick={goBack} className="back-btn">
+                ← Volver
+              </button>
+            )}
+            <button onClick={() => setViewMode('summary')} className="summary-btn">
+              📊 Vista Resumen
             </button>
-          )}
+          </div>
         </div>
 
         {hasSubfolders && (
           <div className="folders-section">
-            <h3>📁 Carpetas</h3>
+            <h3>📁 Carpetas ({currentFolder.subcarpetas.length})</h3>
             <div className="folders-grid">
               {currentFolder.subcarpetas.map((subfolder, index) => (
                 <div 
                   key={index} 
-                  className="folder-item"
-                  onClick={() => navigateToFolder(subfolder)}
+                  className={`folder-item ${subfolder.isEmpty ? 'empty' : ''} ${subfolder.isMissing ? 'missing' : ''}`}
+                  onClick={() => subfolder.id ? navigateToFolder(subfolder) : null}
+                  style={{ cursor: subfolder.id ? 'pointer' : 'not-allowed' }}
                 >
-                  <div className="folder-icon">📁</div>
+                  <div className="folder-icon">
+                    {subfolder.isMissing ? '❌' : subfolder.isEmpty ? '📁' : '📂'}
+                  </div>
                   <div className="folder-info">
                     <h4>{subfolder.nombre}</h4>
                     <p>
-                      {subfolder.documentos.length} documento{subfolder.documentos.length !== 1 ? 's' : ''}
-                      {subfolder.subcarpetas.length > 0 && 
+                      {subfolder.totalDocumentos || 0} documento{(subfolder.totalDocumentos || 0) !== 1 ? 's' : ''}
+                      {subfolder.subcarpetas && subfolder.subcarpetas.length > 0 && 
                         ` • ${subfolder.subcarpetas.length} subcarpeta${subfolder.subcarpetas.length !== 1 ? 's' : ''}`
                       }
                     </p>
+                    {subfolder.isMissing && (
+                      <p className="folder-missing">Carpeta no encontrada en Drive</p>
+                    )}
+                    {subfolder.error && (
+                      <p className="folder-error">Error: {subfolder.error}</p>
+                    )}
                   </div>
-                  <div className="folder-arrow">→</div>
+                  {subfolder.id && !subfolder.isMissing && (
+                    <div className="folder-arrow">→</div>
+                  )}
                 </div>
               ))}
             </div>
@@ -266,15 +435,16 @@ function App() {
 
         {hasDocuments && (
           <div className="documents-section">
-            <h3>📄 Documentos</h3>
+            <h3>📄 Documentos ({currentFolder.documentos.length})</h3>
             <div className="documents-list">
               {currentFolder.documentos.map((doc, index) => (
                 <div key={index} className="document-item">
                   <div className="doc-info">
                     <h4>{doc.nombre}</h4>
-                    <p>Fecha: {doc.fecha}</p>
-                    <p>Tipo: <span className="doc-type">{doc.tipo}</span></p>
-                    <p>Estado: <span className={`status ${doc.estado.toLowerCase()}`}>{doc.estado}</span></p>
+                    <p>📅 Fecha: {doc.fecha}</p>
+                    <p>🏷️ Tipo: <span className="doc-type">{doc.tipo}</span></p>
+                    <p>📊 Estado: <span className={`status ${doc.estado.toLowerCase()}`}>{doc.estado}</span></p>
+                    {doc.tamaño && <p>📏 Tamaño: {doc.tamaño}</p>}
                   </div>
                   {doc.url && (
                     <a href={doc.url} target="_blank" rel="noopener noreferrer" className="view-btn">
@@ -535,7 +705,7 @@ function App() {
             </div>
           </div>
           
-          {renderFolderView()}
+          {viewMode === 'summary' ? renderSummaryView() : renderFolderView()}
         </div>
       )}
 
