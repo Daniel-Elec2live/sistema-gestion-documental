@@ -171,8 +171,13 @@ function App() {
   };
 
   const navigateToFolder = (folder) => {
-    setCurrentFolder(folder);
-    setNavigationPath(prev => [...prev, { nombre: folder.nombre, folder: folder }]);
+    // Solo permitir navegación si la carpeta tiene ID (existe en Drive)
+    if (folder.id) {
+      setCurrentFolder(folder);
+      setNavigationPath(prev => [...prev, { nombre: folder.nombre, folder: folder }]);
+    } else {
+      setMessage(`⚠️ La carpeta "${folder.nombre}" está vacía o no existe aún.`);
+    }
   };
 
   const navigateToPath = (index) => {
@@ -217,6 +222,17 @@ function App() {
     );
   };
 
+  // Función para contar documentos recursivamente
+  const countDocumentsRecursively = (folder) => {
+    let count = folder.documentos ? folder.documentos.length : 0;
+    if (folder.subcarpetas) {
+      folder.subcarpetas.forEach(subfolder => {
+        count += countDocumentsRecursively(subfolder);
+      });
+    }
+    return count;
+  };
+
   const renderFolderView = () => {
     if (!currentFolder) {
       return (
@@ -226,10 +242,6 @@ function App() {
       );
     }
 
-    console.log('Renderizando carpeta actual:', currentFolder);
-    console.log('Subcarpetas disponibles:', currentFolder.subcarpetas);
-
-    // CAMBIO CRÍTICO: Verificar subcarpetas de manera más permisiva
     const hasSubfolders = currentFolder.subcarpetas && currentFolder.subcarpetas.length > 0;
     const hasDocuments = currentFolder.documentos && currentFolder.documentos.length > 0;
 
@@ -244,56 +256,43 @@ function App() {
           )}
         </div>
 
-        {/* MOSTRAR INFORMACIÓN DE DEBUG */}
-        <div style={{ margin: '10px 0', padding: '10px', backgroundColor: '#f0f0f0', borderRadius: '5px', fontSize: '12px' }}>
-          <strong>Debug Info:</strong><br/>
-          Carpeta actual: {currentFolder.nombre}<br/>
-          Subcarpetas encontradas: {currentFolder.subcarpetas ? currentFolder.subcarpetas.length : 0}<br/>
-          Documentos encontrados: {currentFolder.documentos ? currentFolder.documentos.length : 0}<br/>
-          {currentFolder.subcarpetas && currentFolder.subcarpetas.length > 0 && (
-            <>Nombres de subcarpetas: {currentFolder.subcarpetas.map(s => s.nombre).join(', ')}</>
-          )}
-        </div>
-
         {hasSubfolders && (
           <div className="folders-section">
             <h3>📁 Carpetas ({currentFolder.subcarpetas.length})</h3>
             <div className="folders-grid">
-              {currentFolder.subcarpetas.map((subfolder, index) => (
-                <div 
-                  key={`folder-${index}-${subfolder.nombre}`}
-                  className={`folder-item ${!subfolder.id ? 'folder-empty' : ''}`}
-                  onClick={() => {
-                    if (subfolder.id) {
-                      navigateToFolder(subfolder);
-                    } else {
-                      setMessage(`⚠️ La carpeta "${subfolder.nombre}" está vacía o no existe aún.`);
-                    }
-                  }}
-                  style={{ cursor: subfolder.id ? 'pointer' : 'not-allowed' }}
-                >
-                  <div className="folder-icon">
-                    {subfolder.id ? '📂' : '📁'}
-                  </div>
-                  <div className="folder-info">
-                    <h4>{subfolder.nombre}</h4>
-                    <p>
-                      {subfolder.documentos ? subfolder.documentos.length : 0} documento{(subfolder.documentos?.length || 0) !== 1 ? 's' : ''}
-                      {subfolder.subcarpetas && subfolder.subcarpetas.length > 0 && 
-                        ` • ${subfolder.subcarpetas.length} subcarpeta${subfolder.subcarpetas.length !== 1 ? 's' : ''}`
-                      }
-                    </p>
-                    {!subfolder.id && (
-                      <p style={{ color: '#888', fontSize: '12px', fontStyle: 'italic' }}>
-                        Carpeta vacía
+              {currentFolder.subcarpetas.map((subfolder, index) => {
+                const totalDocs = countDocumentsRecursively(subfolder);
+                
+                return (
+                  <div 
+                    key={`folder-${index}-${subfolder.nombre}`}
+                    className={`folder-item ${!subfolder.id ? 'folder-empty' : ''}`}
+                    onClick={() => navigateToFolder(subfolder)}
+                    style={{ cursor: subfolder.id ? 'pointer' : 'not-allowed' }}
+                  >
+                    <div className="folder-icon">
+                      {subfolder.id ? '📂' : '📁'}
+                    </div>
+                    <div className="folder-info">
+                      <h4>{subfolder.nombre}</h4>
+                      <p>
+                        {totalDocs} documento{totalDocs !== 1 ? 's' : ''}
+                        {subfolder.subcarpetas && subfolder.subcarpetas.length > 0 && 
+                          ` • ${subfolder.subcarpetas.length} subcarpeta${subfolder.subcarpetas.length !== 1 ? 's' : ''}`
+                        }
                       </p>
-                    )}
+                      {!subfolder.id && (
+                        <p style={{ color: '#888', fontSize: '12px', fontStyle: 'italic' }}>
+                          Carpeta vacía
+                        </p>
+                      )}
+                    </div>
+                    <div className="folder-arrow">
+                      {subfolder.id ? '→' : '∅'}
+                    </div>
                   </div>
-                  <div className="folder-arrow">
-                    {subfolder.id ? '→' : '∅'}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -327,9 +326,6 @@ function App() {
             <div className="empty-folder-icon">📂</div>
             <h3>Carpeta vacía</h3>
             <p>Esta carpeta no contiene documentos ni subcarpetas.</p>
-            <p style={{ fontSize: '12px', color: '#666', marginTop: '10px' }}>
-              Debug: subcarpetas={currentFolder.subcarpetas?.length || 0}, documentos={currentFolder.documentos?.length || 0}
-            </p>
           </div>
         )}
       </div>
