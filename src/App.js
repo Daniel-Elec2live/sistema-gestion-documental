@@ -21,7 +21,6 @@ function App() {
 
   // Dashboard trabajador
   const [loginData, setLoginData] = useState({ dni: '', correo: '' });
-  const [folderStructure, setFolderStructure] = useState(null);
   const [workerInfo, setWorkerInfo] = useState(null);
   const [currentFolder, setCurrentFolder] = useState(null);
   const [navigationPath, setNavigationPath] = useState([]);
@@ -155,7 +154,6 @@ function App() {
       console.log('Respuesta del servidor:', result);
 
       if (response.ok) {
-        setFolderStructure(result.folderStructure);
         setWorkerInfo(result.workerInfo);
         setCurrentFolder(result.folderStructure);
         setNavigationPath([{ nombre: result.folderStructure.nombre, folder: result.folderStructure }]);
@@ -193,7 +191,6 @@ function App() {
 
   const logout = () => {
     setIsLoggedIn(false);
-    setFolderStructure(null);
     setWorkerInfo(null);
     setCurrentFolder(null);
     setNavigationPath([]);
