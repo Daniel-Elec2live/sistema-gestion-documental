@@ -190,7 +190,7 @@ exports.handler = async (event, context) => {
       isSharedDrive: !!carpetaInfo.driveId
     });
 
-    // 3. Definir estructura esperada de carpetas (según el sistema de registro)
+    // 3. Definir carpetas esperadas del sistema
     const expectedFolders = [
       'Nóminas',
       'Contratos', 
@@ -200,156 +200,150 @@ exports.handler = async (event, context) => {
       'Pendiente de Firma'
     ];
 
-    // 4. Función optimizada para obtener documentos CON CONTADOR POR CARPETA
-    async function getDocumentsFromFolder(folderId, folderName = 'Carpeta Principal', isMainFolder = false) {
+    // 4. Función optimizada para obtener documentos CON SOPORTE PARA SHARED DRIVES
+    async function getDocumentsFromFolder(folderId, folderName = 'Carpeta Principal', maxDepth = 2, currentDepth = 0) {
       const folderData = {
-        id: folderId,
         nombre: folderName,
         documentos: [],
-        subcarpetas: [],
-        totalDocumentos: 0,
-        isEmpty: true,
-        url: `https://drive.google.com/drive/folders/${folderId}`,
-        isVisible: true
+        subcarpetas: []
       };
       
       try {
-        console.log(`📁 Procesando carpeta: ${folderName}`);
+        console.log(`📁 Procesando carpeta: ${folderName} (profundidad: ${currentDepth})`);
         
         // Obtener contenido de la carpeta CON SOPORTE PARA SHARED DRIVES
         const listParams = {
           q: `'${folderId}' in parents and trashed=false`,
-          fields: 'files(id, name, createdTime, modifiedTime, webViewLink, mimeType, size, parents)',
+          fields: 'files(id, name, createdTime, modifiedTime, webViewLink, mimeType, size)',
           orderBy: 'name,createdTime desc',
-          pageSize: 200, // Aumentar límite
+          pageSize: 100, // Limitar resultados
           supportsAllDrives: true,
           includeItemsFromAllDrives: true
         };
 
-        // Agregar driveId si la carpeta está en un Shared Drive
+        // Agregar driveId y corpora si la carpeta está en un Shared Drive
         if (carpetaInfo.driveId) {
           listParams.driveId = carpetaInfo.driveId;
+          listParams.corpora = 'drive'; // CRÍTICO: Agregar corpora
         }
 
         const listResponse = await Promise.race([
           drive.files.list(listParams),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout listando archivos')), 10000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout listando archivos')), 8000))
         ]);
 
         const files = listResponse.data.files || [];
         console.log(`📄 Encontrados ${files.length} elementos en ${folderName}`);
         
-        // Si es la carpeta principal, crear subcarpetas faltantes
-        if (isMainFolder) {
-          const existingFolders = files
-            .filter(file => file.mimeType === 'application/vnd.google-apps.folder')
-            .map(folder => folder.name);
-          
-          console.log('📋 Carpetas existentes:', existingFolders);
-          console.log('📋 Carpetas esperadas:', expectedFolders);
+        // Si es la carpeta principal, asegurar que todas las carpetas esperadas estén presentes
+        if (currentDepth === 0) {
+          // Primero, procesar las carpetas que existen en Drive
+          const existingFolders = files.filter(file => file.mimeType === 'application/vnd.google-apps.folder');
+          const processedFolderNames = new Set();
 
-          // Para cada carpeta esperada, crear estructura incluso si no existe
-          for (const expectedFolder of expectedFolders) {
-            const existingFolder = files.find(file => 
-              file.mimeType === 'application/vnd.google-apps.folder' && 
-              file.name === expectedFolder
-            );
-
-            if (existingFolder) {
-              // Procesar carpeta existente
-              console.log(`✅ Procesando carpeta existente: ${expectedFolder}`);
+          for (const file of existingFolders) {
+            processedFolderNames.add(file.name);
+            
+            const subfolderData = {
+              nombre: file.name,
+              documentos: [],
+              subcarpetas: [],
+              id: file.id,
+              hasContent: true
+            };
+            
+            // Solo procesar subcarpetas si no hemos alcanzado la profundidad máxima
+            if (currentDepth < maxDepth) {
+              console.log(`📁 Procesando subcarpeta existente: ${file.name}`);
               const subfolderContent = await getDocumentsFromFolder(
-                existingFolder.id, 
-                existingFolder.name, 
-                false
+                file.id, 
+                file.name, 
+                maxDepth, 
+                currentDepth + 1
               ).catch(err => {
-                console.error(`❌ Error procesando subcarpeta ${expectedFolder}:`, err);
-                return {
-                  id: existingFolder.id,
-                  nombre: expectedFolder,
-                  documentos: [],
-                  subcarpetas: [],
-                  totalDocumentos: 0,
-                  isEmpty: true,
-                  url: `https://drive.google.com/drive/folders/${existingFolder.id}`,
-                  isVisible: true,
-                  error: err.message
-                };
+                console.error(`❌ Error procesando subcarpeta ${file.name}:`, err);
+                return subfolderData; // Devolver estructura vacía si falla
               });
               
               folderData.subcarpetas.push(subfolderContent);
             } else {
-              // Crear estructura vacía para carpeta faltante
-              console.log(`⚠️ Carpeta faltante: ${expectedFolder} - creando estructura vacía`);
+              folderData.subcarpetas.push(subfolderData);
+            }
+          }
+
+          // Luego, agregar las carpetas esperadas que no existen
+          for (const expectedFolder of expectedFolders) {
+            if (!processedFolderNames.has(expectedFolder)) {
+              console.log(`📁 Agregando carpeta faltante: ${expectedFolder}`);
               folderData.subcarpetas.push({
-                id: null,
                 nombre: expectedFolder,
                 documentos: [],
                 subcarpetas: [],
-                totalDocumentos: 0,
-                isEmpty: true,
-                url: null,
-                isVisible: true,
-                isMissing: true,
-                description: `Carpeta ${expectedFolder} no encontrada en Drive`
+                id: null, // No tiene ID porque no existe
+                hasContent: false
               });
             }
           }
 
-          // Procesar otras carpetas no esperadas
-          const otherFolders = files.filter(file => 
-            file.mimeType === 'application/vnd.google-apps.folder' && 
-            !expectedFolders.includes(file.name)
-          );
-
-          for (const otherFolder of otherFolders) {
-            console.log(`📁 Procesando carpeta adicional: ${otherFolder.name}`);
-            const subfolderContent = await getDocumentsFromFolder(
-              otherFolder.id, 
-              otherFolder.name, 
-              false
-            ).catch(err => {
-              console.error(`❌ Error procesando carpeta adicional ${otherFolder.name}:`, err);
-              return {
-                id: otherFolder.id,
-                nombre: otherFolder.name,
+          // Procesar otras carpetas que no están en la lista esperada
+          for (const file of existingFolders) {
+            if (!expectedFolders.includes(file.name) && !processedFolderNames.has(file.name)) {
+              console.log(`📁 Procesando carpeta adicional: ${file.name}`);
+              const subfolderData = {
+                nombre: file.name,
                 documentos: [],
                 subcarpetas: [],
-                totalDocumentos: 0,
-                isEmpty: true,
-                url: `https://drive.google.com/drive/folders/${otherFolder.id}`,
-                isVisible: true,
-                error: err.message
+                id: file.id,
+                hasContent: true
               };
-            });
-            
-            folderData.subcarpetas.push(subfolderContent);
+              
+              if (currentDepth < maxDepth) {
+                const subfolderContent = await getDocumentsFromFolder(
+                  file.id, 
+                  file.name, 
+                  maxDepth, 
+                  currentDepth + 1
+                ).catch(err => {
+                  console.error(`❌ Error procesando carpeta adicional ${file.name}:`, err);
+                  return subfolderData;
+                });
+                
+                folderData.subcarpetas.push(subfolderContent);
+              } else {
+                folderData.subcarpetas.push(subfolderData);
+              }
+            }
           }
         } else {
-          // Para subcarpetas, procesar normalmente
+          // Para subcarpetas normales, procesar como antes
           for (const file of files) {
             if (file.mimeType === 'application/vnd.google-apps.folder') {
-              // Es una subcarpeta - procesar recursivamente
-              const subfolderContent = await getDocumentsFromFolder(
-                file.id, 
-                file.name, 
-                false
-              ).catch(err => {
-                console.error(`❌ Error procesando subcarpeta ${file.name}:`, err);
-                return {
-                  id: file.id,
-                  nombre: file.name,
-                  documentos: [],
-                  subcarpetas: [],
-                  totalDocumentos: 0,
-                  isEmpty: true,
-                  url: `https://drive.google.com/drive/folders/${file.id}`,
-                  isVisible: true,
-                  error: err.message
-                };
-              });
+              // Es una carpeta
+              const subfolderData = {
+                nombre: file.name,
+                documentos: [],
+                subcarpetas: [],
+                id: file.id,
+                hasContent: true
+              };
               
-              folderData.subcarpetas.push(subfolderContent);
+              // Solo procesar subcarpetas si no hemos alcanzado la profundidad máxima
+              if (currentDepth < maxDepth) {
+                console.log(`📁 Procesando subcarpeta: ${file.name}`);
+                const subfolderContent = await getDocumentsFromFolder(
+                  file.id, 
+                  file.name, 
+                  maxDepth, 
+                  currentDepth + 1
+                ).catch(err => {
+                  console.error(`❌ Error procesando subcarpeta ${file.name}:`, err);
+                  return subfolderData; // Devolver estructura vacía si falla
+                });
+                
+                folderData.subcarpetas.push(subfolderContent);
+              } else {
+                folderData.subcarpetas.push(subfolderData);
+              }
             }
           }
         }
@@ -377,7 +371,6 @@ exports.handler = async (event, context) => {
           else if (file.name.toLowerCase().includes('pendiente')) estado = 'Pendiente';
 
           folderData.documentos.push({
-            id: file.id,
             nombre: file.name,
             fecha: new Date(file.createdTime).toLocaleDateString('es-ES'),
             fechaModificacion: new Date(file.modifiedTime).toLocaleDateString('es-ES'),
@@ -385,41 +378,27 @@ exports.handler = async (event, context) => {
             url: file.webViewLink,
             tipo: tipoArchivo,
             mimeType: file.mimeType,
-            tamaño: file.size ? `${Math.round(file.size / 1024)} KB` : 'N/A'
+            tamaño: file.size ? `${Math.round(file.size / 1024)} KB` : 'N/A',
+            id: file.id
           });
         }
 
         // Ordenar documentos por fecha de creación (más recientes primero)
         folderData.documentos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
 
-        // Calcular totales
-        folderData.totalDocumentos = folderData.documentos.length;
-        
-        // Agregar documentos de subcarpetas al total
-        for (const subcarpeta of folderData.subcarpetas) {
-          folderData.totalDocumentos += subcarpeta.totalDocumentos;
-        }
-
-        // Determinar si está vacía
-        folderData.isEmpty = folderData.totalDocumentos === 0;
-
-        console.log(`📊 Carpeta ${folderName}: ${folderData.documentos.length} documentos directos, ${folderData.totalDocumentos} documentos totales`);
-
       } catch (error) {
         console.error(`❌ Error procesando carpeta ${folderName}:`, error);
-        folderData.error = error.message;
-        folderData.isEmpty = true;
-        folderData.isVisible = true; // Mantener visible aunque tenga error
+        // No fallar completamente, devolver estructura parcial
       }
 
       return folderData;
     }
 
-    // 5. Obtener estructura de carpetas completa (incluyendo carpetas vacías)
-    console.log('🔄 Obteniendo estructura completa de documentos...');
-    const folderStructure = await getDocumentsFromFolder(carpetaId, 'Mis Documentos', true);
+    // 5. Obtener estructura de carpetas completa
+    console.log('🔄 Obteniendo estructura de documentos...');
+    const folderStructure = await getDocumentsFromFolder(carpetaId, 'Mis Documentos', 2);
 
-    // 6. Función para contar documentos totales
+    // 6. Contar total de documentos (función recursiva optimizada)
     function countAllDocuments(folderData) {
       let total = folderData.documentos.length;
       if (folderData.subcarpetas && folderData.subcarpetas.length > 0) {
@@ -438,14 +417,7 @@ exports.handler = async (event, context) => {
       const allDocs = [];
       
       function extractDocs(folder) {
-        // Agregar información de la carpeta a cada documento
-        const docsWithFolder = folder.documentos.map(doc => ({
-          ...doc,
-          carpeta: folder.nombre,
-          carpetaId: folder.id
-        }));
-        allDocs.push(...docsWithFolder);
-        
+        allDocs.push(...folder.documentos);
         if (folder.subcarpetas) {
           folder.subcarpetas.forEach(sub => extractDocs(sub));
         }
@@ -461,20 +433,7 @@ exports.handler = async (event, context) => {
 
     const recentDocuments = getRecentDocuments(folderStructure);
 
-    // 8. Crear resumen por carpetas
-    const folderSummary = folderStructure.subcarpetas.map(carpeta => ({
-      nombre: carpeta.nombre,
-      id: carpeta.id,
-      totalDocumentos: carpeta.totalDocumentos,
-      documentosDirectos: carpeta.documentos.length,
-      isEmpty: carpeta.isEmpty,
-      isVisible: carpeta.isVisible,
-      isMissing: carpeta.isMissing || false,
-      url: carpeta.url,
-      ultimoDocumento: carpeta.documentos.length > 0 ? carpeta.documentos[0] : null
-    }));
-
-    // 9. Actualizar total de documentos en la hoja (sin bloquear)
+    // 8. Actualizar total de documentos en la hoja (sin bloquear)
     const rowIndex = rows.findIndex(row => row[1] === dni && row[2] === correo) + 1;
     
     if (rowIndex > 0) {
@@ -506,11 +465,9 @@ exports.handler = async (event, context) => {
       });
     }
 
-    // 10. Preparar respuesta estructurada
+    // 9. Preparar respuesta
     const responseData = {
-      success: true,
       folderStructure: folderStructure,
-      folderSummary: folderSummary,
       recentDocuments: recentDocuments,
       workerInfo: {
         nombre: trabajadorRow[0],
@@ -531,18 +488,15 @@ exports.handler = async (event, context) => {
           detras: trabajadorRow[15] || null   // Columna P
         }
       },
-      statistics: {
+      summary: {
         carpetasPrincipales: folderStructure.subcarpetas.length,
-        carpetasConDocumentos: folderSummary.filter(f => !f.isEmpty).length,
-        carpetasVacias: folderSummary.filter(f => f.isEmpty).length,
-        carpetasFaltantes: folderSummary.filter(f => f.isMissing).length,
         documentosTotales: totalDocuments,
         documentosRecientes: recentDocuments.length,
         ultimaConsulta: new Date().toISOString()
       }
     };
 
-    // 11. Guardar en cache
+    // 10. Guardar en cache
     workerCache.set(cacheKey, {
       timestamp: Date.now(),
       data: responseData
@@ -555,7 +509,6 @@ exports.handler = async (event, context) => {
     }
 
     console.log(`✅ Consulta completada exitosamente para: ${trabajadorRow[0]}`);
-    console.log(`📊 Resumen: ${folderSummary.length} carpetas, ${totalDocuments} documentos totales`);
 
     return {
       statusCode: 200,
