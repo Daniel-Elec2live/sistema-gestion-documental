@@ -6,6 +6,41 @@ const API_BASE = process.env.NODE_ENV === 'production'
   ? '/.netlify/functions' 
   : 'http://localhost:8888/.netlify/functions';
 
+// Detectar móvil
+const isMobile = /Mobi|Android/i.test(navigator.userAgent);
+
+// Función de compresión de imágenes para móviles
+const compressImageForMobile = (file, quality = 0.7) => {
+  return new Promise((resolve) => {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+
+    img.onload = () => {
+      // Calcular nuevas dimensiones (máximo 1920x1080 para móviles)
+      const maxWidth = isMobile ? 1920 : 2560;
+      const maxHeight = isMobile ? 1080 : 1440;
+      
+      let { width, height } = img;
+      
+      if (width > maxWidth || height > maxHeight) {
+        const ratio = Math.min(maxWidth / width, maxHeight / height);
+        width *= ratio;
+        height *= ratio;
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+
+      ctx.drawImage(img, 0, 0, width, height);
+      
+      canvas.toBlob(resolve, 'image/jpeg', quality);
+    };
+
+    img.src = URL.createObjectURL(file);
+  });
+};
+
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(false);
@@ -36,6 +71,13 @@ function App() {
     }
   }, [message]);
 
+  // Log inicial para debug
+  useEffect(() => {
+    console.log(`📱 App inicializada - Móvil: ${isMobile}`);
+    console.log(`🌐 API Base: ${API_BASE}`);
+    console.log(`🔧 User Agent: ${navigator.userAgent}`);
+  }, []);
+
   const handleInputChange = (e, form = 'register') => {
     const { name, value } = e.target;
     if (form === 'register') {
@@ -45,35 +87,75 @@ function App() {
     }
   };
 
-  const handleFileChange = (e) => {
+  const handleFileChange = async (e) => {
     const { name, files } = e.target;
     const file = files[0];
     
-    if (file) {
-      // Validar tamaño (max 5MB)
-      if (file.size > 5 * 1024 * 1024) {
-        setMessage('❌ La imagen es demasiado grande. Máximo 5MB.');
-        e.target.value = ''; // Limpiar el input
+    if (!file) return;
+
+    try {
+      console.log(`📎 Archivo seleccionado: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+
+      // Validar tamaño inicial (max 20MB)
+      if (file.size > 20 * 1024 * 1024) {
+        setMessage('❌ La imagen es demasiado grande. Máximo 20MB.');
+        e.target.value = '';
         return;
       }
       
       // Validar tipo
       if (!file.type.startsWith('image/')) {
         setMessage('❌ Solo se permiten archivos de imagen.');
-        e.target.value = ''; // Limpiar el input
+        e.target.value = '';
         return;
       }
+
+      let processedFile = file;
+
+      // Comprimir para móviles si es necesario
+      if (isMobile && file.size > 5 * 1024 * 1024) {
+        console.log('📱 Comprimiendo imagen para móvil...');
+        setMessage('📱 Optimizando imagen para móvil...');
+        
+        try {
+          processedFile = await compressImageForMobile(file, 0.7);
+          console.log(`✅ Imagen comprimida: ${file.size} → ${processedFile.size}`);
+          
+          // Crear nuevo nombre para el archivo comprimido
+          processedFile.name = file.name.replace(/\.[^/.]+$/, '_compressed.jpg');
+          
+          setMessage('✅ Imagen optimizada correctamente');
+          setTimeout(() => setMessage(''), 2000);
+        } catch (compressionError) {
+          console.error('❌ Error comprimiendo imagen:', compressionError);
+          setMessage('⚠️ No se pudo comprimir la imagen, usando original');
+          processedFile = file;
+        }
+      }
       
-      setFormData(prev => ({ ...prev, [name]: file }));
+      setFormData(prev => ({ ...prev, [name]: processedFile }));
+      
+    } catch (error) {
+      console.error('❌ Error procesando archivo:', error);
+      setMessage('❌ Error procesando la imagen');
+      e.target.value = '';
     }
   };
 
   const handleRegister = async (e) => {
     e.preventDefault();
+    
+    if (loading) {
+      console.log('⏳ Envío en proceso, ignorando...');
+      return;
+    }
+
     setLoading(true);
     setMessage('');
 
     try {
+      console.log('🚀 Iniciando registro...');
+      
       // Validaciones adicionales
       if (!formData.dniDelante || !formData.dniDetras) {
         setMessage('❌ Debes subir ambas fotos del DNI');
@@ -100,34 +182,74 @@ function App() {
       formDataToSend.append('dniDelante', formData.dniDelante);
       formDataToSend.append('dniDetras', formData.dniDetras);
 
-      console.log('Enviando formulario a:', `${API_BASE}/register-worker`);
+      console.log('📤 Enviando formulario a:', `${API_BASE}/registrar-trabajador`);
+      console.log('📊 Datos del formulario:', {
+        nombre: formData.nombre,
+        dni: formData.dni,
+        correo: formData.correo,
+        empresa: formData.empresa,
+        dniDelanteSize: formData.dniDelante?.size,
+        dniDetrasSize: formData.dniDetras?.size
+      });
 
-      const response = await fetch(`${API_BASE}/register-worker`, {
+      // Timeout más largo para móviles
+      const timeoutMs = isMobile ? 60000 : 30000; // 60s móvil, 30s escritorio
+      
+      const fetchPromise = fetch(`${API_BASE}/registrar-trabajador`, {
         method: 'POST',
         body: formDataToSend
         // NO establecer Content-Type header cuando uses FormData
       });
 
+      const response = await Promise.race([
+        fetchPromise,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout - La operación tardó demasiado')), timeoutMs)
+        )
+      ]);
+
+      console.log('📡 Respuesta recibida:', response.status, response.statusText);
+
       const result = await response.json();
-      console.log('Respuesta del servidor:', result);
+      console.log('📋 Resultado del servidor:', result);
 
       if (response.ok) {
         setMessage('✅ Trabajador registrado exitosamente. Recibirás un email de confirmación en breve.');
+        
         // Resetear formulario
         setFormData({ 
           nombre: '', dni: '', correo: '', telefono: '', 
           calle: '', numero: '', codigoPostal: '', localidad: '', provincia: '',
           empresa: '', talla: '', dniDelante: null, dniDetras: null
         });
+        
         // Limpiar inputs de archivo
         const fileInputs = document.querySelectorAll('input[type="file"]');
         fileInputs.forEach(input => input.value = '');
+        
+        // Mostrar información adicional si está disponible
+        if (result.processingTime) {
+          console.log(`⏱️ Tiempo de procesamiento: ${result.processingTime}ms`);
+        }
+        
       } else {
         setMessage(`❌ Error: ${result.error || 'Error desconocido'}`);
+        
+        // Log adicional para debug
+        if (result.details) {
+          console.error('📋 Detalles del error:', result.details);
+        }
       }
     } catch (error) {
-      console.error('Error en registro:', error);
-      setMessage('❌ Error de conexión. Por favor, inténtalo de nuevo.');
+      console.error('❌ Error en registro:', error);
+      
+      if (error.message.includes('Timeout')) {
+        setMessage('⏰ La operación tardó más de lo esperado. Por favor, inténtalo de nuevo.');
+      } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        setMessage('🌐 Error de conexión. Verifica tu conexión a internet.');
+      } else {
+        setMessage('❌ Error de conexión. Por favor, inténtalo de nuevo.');
+      }
     } finally {
       setLoading(false);
     }
@@ -139,7 +261,7 @@ function App() {
     setMessage('');
 
     try {
-      console.log('Iniciando login con:', loginData);
+      console.log('🔐 Iniciando login con:', loginData);
       
       const response = await fetch(`${API_BASE}/worker-documents`, {
         method: 'POST',
@@ -151,7 +273,7 @@ function App() {
       });
 
       const result = await response.json();
-      console.log('Respuesta del servidor:', result);
+      console.log('📋 Respuesta del servidor:', result);
 
       if (response.ok) {
         setWorkerInfo(result.workerInfo);
@@ -163,7 +285,7 @@ function App() {
         setMessage(`❌ ${result.error || 'Error al acceder'}`);
       }
     } catch (error) {
-      console.error('Error en login:', error);
+      console.error('❌ Error en login:', error);
       setMessage('❌ Error de conexión. Por favor, inténtalo de nuevo.');
     } finally {
       setLoading(false);
@@ -336,6 +458,20 @@ function App() {
     <div className="container">
       <h1>Sistema de Gestión Documental</h1>
       
+      {/* Indicador de móvil para debug */}
+      {isMobile && process.env.NODE_ENV === 'development' && (
+        <div style={{ 
+          background: '#e3f2fd', 
+          padding: '8px', 
+          marginBottom: '10px', 
+          borderRadius: '4px',
+          fontSize: '12px',
+          color: '#1976d2'
+        }}>
+          📱 Modo móvil detectado - Optimizaciones activas
+        </div>
+      )}
+      
       {!isLoggedIn ? (
         <>
           <div className="tabs">
@@ -435,6 +571,7 @@ function App() {
                         id="dniDelante"
                         name="dniDelante"
                         accept="image/*"
+                        capture={isMobile ? "environment" : undefined}
                         onChange={handleFileChange}
                         required
                         className="file-input"
@@ -454,6 +591,7 @@ function App() {
                         id="dniDetras"
                         name="dniDetras"
                         accept="image/*"
+                        capture={isMobile ? "environment" : undefined}
                         onChange={handleFileChange}
                         required
                         className="file-input"
@@ -464,7 +602,8 @@ function App() {
                     </div>
                   </div>
                   <p className="file-help-text">
-                    Sube fotos claras de ambas caras de tu DNI/NIE. Máximo 5MB por imagen.
+                    Sube fotos claras de ambas caras de tu DNI/NIE. 
+                    {isMobile ? ' Las imágenes se optimizarán automáticamente.' : ' Máximo 20MB por imagen.'}
                   </p>
                 </div>
 
@@ -549,7 +688,7 @@ function App() {
                 </div>
 
                 <button type="submit" disabled={loading}>
-                  {loading ? 'Registrando...' : 'Registrarme'}
+                  {loading ? (isMobile ? 'Procesando...' : 'Registrando...') : 'Registrarme'}
                 </button>
               </form>
             </div>

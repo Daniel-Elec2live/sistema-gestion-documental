@@ -41,7 +41,7 @@ async function getFileInfo(drive, fileId) {
 let transporter;
 try {
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    transporter = nodemailer.createTransport({
+    transporter = nodemailer.createTransporter({
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT) || 587,
       secure: process.env.SMTP_SECURE === 'true',
@@ -381,68 +381,123 @@ function grantPermissionsAsync(drive, carpetaId, subcarpetasIds, workerEmail, do
   });
 }
 
-// Función para parsear FormData
+// Función MEJORADA para parsear FormData (compatible con móvil)
 function parseFormData(event) {
   return new Promise((resolve, reject) => {
-    const form = new multiparty.Form();
-    
-    let bodyBuffer;
-    if (event.isBase64Encoded) {
-      bodyBuffer = Buffer.from(event.body, 'base64');
-    } else {
-      bodyBuffer = Buffer.from(event.body);
-    }
-
-    const { Readable } = require('stream');
-    const bodyStream = new Readable();
-    bodyStream.push(bodyBuffer);
-    bodyStream.push(null);
-    
-    bodyStream.headers = event.headers;
-    bodyStream.method = 'POST';
-
-    const fields = {};
-    const files = {};
-
-    form.on('field', (name, value) => {
-      fields[name] = value;
-    });
-
-    form.on('part', (part) => {
-      if (part.filename) {
-        const chunks = [];
-        part.on('data', (chunk) => {
-          chunks.push(chunk);
-        });
-        part.on('end', () => {
-          files[part.name] = {
-            originalFilename: part.filename,
-            headers: part.headers,
-            buffer: Buffer.concat(chunks)
-          };
-        });
+    try {
+      console.log('🔍 Analizando content-type:', event.headers['content-type']);
+      console.log('🔍 Body length:', event.body?.length || 0);
+      console.log('🔍 Is base64:', event.isBase64Encoded);
+      
+      const form = new multiparty.Form({
+        maxFilesSize: 50 * 1024 * 1024, // 50MB máximo
+        maxFields: 20,
+        maxFieldsSize: 10 * 1024 * 1024 // 10MB para campos
+      });
+      
+      let bodyBuffer;
+      if (event.isBase64Encoded) {
+        bodyBuffer = Buffer.from(event.body, 'base64');
+      } else {
+        bodyBuffer = Buffer.from(event.body, 'utf8');
       }
-    });
 
-    form.on('error', reject);
-    form.on('close', () => resolve({ fields, files }));
-    form.parse(bodyStream);
+      console.log('📦 Buffer creado, tamaño:', bodyBuffer.length);
+
+      const { Readable } = require('stream');
+      const bodyStream = new Readable();
+      bodyStream.push(bodyBuffer);
+      bodyStream.push(null);
+      
+      // Headers críticos para móvil
+      bodyStream.headers = {
+        ...event.headers,
+        'content-length': bodyBuffer.length.toString()
+      };
+      bodyStream.method = 'POST';
+
+      const fields = {};
+      const files = {};
+
+      form.on('field', (name, value) => {
+        fields[name] = value;
+        console.log(`📝 Campo recibido: ${name} = ${value?.substring(0, 50)}...`);
+      });
+
+      form.on('part', (part) => {
+        console.log(`📎 Parte recibida: ${part.name}, filename: ${part.filename}`);
+        
+        if (part.filename) {
+          const chunks = [];
+          part.on('data', (chunk) => {
+            chunks.push(chunk);
+          });
+          part.on('end', () => {
+            const buffer = Buffer.concat(chunks);
+            files[part.name] = {
+              originalFilename: part.filename,
+              headers: part.headers,
+              buffer: buffer
+            };
+            console.log(`✅ Archivo procesado: ${part.name}, tamaño: ${buffer.length}`);
+          });
+          part.on('error', (error) => {
+            console.error(`❌ Error en parte ${part.name}:`, error);
+          });
+        }
+      });
+
+      form.on('error', (error) => {
+        console.error('❌ Error en multiparty:', error);
+        reject(error);
+      });
+      
+      form.on('close', () => {
+        console.log('✅ FormData parseado correctamente');
+        console.log('📊 Campos:', Object.keys(fields));
+        console.log('📊 Archivos:', Object.keys(files));
+        resolve({ fields, files });
+      });
+
+      // Timeout de seguridad para móvil
+      setTimeout(() => {
+        reject(new Error('Timeout parseando FormData'));
+      }, 30000);
+
+      form.parse(bodyStream);
+      
+    } catch (error) {
+      console.error('❌ Error crítico en parseFormData:', error);
+      reject(error);
+    }
   });
 }
 
 exports.handler = async (event, context) => {
-  // CORS headers
+  // AUMENTAR TIMEOUT
+  context.callbackWaitsForEmptyEventLoop = false;
+  
+  // CORS headers mejorados para móvil
   const headers = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS'
+    'Access-Control-Allow-Headers': 'Content-Type, Content-Length',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Max-Age': '86400'
   };
 
+  // Log inicial para debug
+  console.log('🚀 INICIO - Proceso optimizado de registro');
+  console.log('📱 User-Agent:', event.headers['user-agent'] || 'No disponible');
+  console.log('🌐 Método:', event.httpMethod);
+  console.log('📋 Content-Type:', event.headers['content-type'] || 'No disponible');
+
   if (event.httpMethod === 'OPTIONS') {
+    console.log('✅ Respondiendo a preflight CORS');
     return { statusCode: 200, headers, body: '' };
   }
 
   if (event.httpMethod !== 'POST') {
+    console.log('❌ Método no permitido:', event.httpMethod);
     return {
       statusCode: 405,
       headers,
@@ -454,42 +509,76 @@ exports.handler = async (event, context) => {
   const startTime = Date.now();
 
   try {
-    console.log('🚀 INICIO - Proceso optimizado de registro');
-
-    // PASO 1: Parsear datos (RÁPIDO)
+    // PASO 1: Parsear datos (MEJORADO para móvil)
     let formData;
     try {
-      if (event.headers['content-type'] && event.headers['content-type'].includes('application/json')) {
+      console.log('🔄 Iniciando parseo de datos...');
+      
+      // Verificar si hay body
+      if (!event.body) {
+        console.log('❌ No hay body en la request');
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({ error: 'No se recibieron datos' })
+        };
+      }
+
+      // Parsear según content-type
+      const contentType = event.headers['content-type'] || '';
+      
+      if (contentType.includes('application/json')) {
+        console.log('📝 Parseando JSON...');
         const jsonData = JSON.parse(event.body);
         formData = {
           fields: jsonData,
           files: {
             dniDelante: jsonData.dniDelante ? { 
               buffer: Buffer.from(jsonData.dniDelante.split(',')[1], 'base64'), 
-              originalFilename: jsonData.dniDelanteNombre 
+              originalFilename: jsonData.dniDelanteNombre || 'dni_delante.jpg',
+              headers: { 'content-type': 'image/jpeg' }
             } : null,
             dniDetras: jsonData.dniDetras ? { 
               buffer: Buffer.from(jsonData.dniDetras.split(',')[1], 'base64'), 
-              originalFilename: jsonData.dniDetrasNombre 
+              originalFilename: jsonData.dniDetrasNombre || 'dni_detras.jpg',
+              headers: { 'content-type': 'image/jpeg' }
             } : null
           }
         };
-      } else {
+      } else if (contentType.includes('multipart/form-data')) {
+        console.log('📎 Parseando FormData...');
         formData = await parseFormData(event);
+      } else {
+        console.log('❌ Content-type no soportado:', contentType);
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({ error: 'Tipo de contenido no soportado' })
+        };
       }
+      
+      console.log('✅ Datos parseados correctamente');
+      
     } catch (parseError) {
+      console.error('❌ Error parseando datos:', parseError.message);
       return {
         statusCode: 400,
         headers,
-        body: JSON.stringify({ error: 'Error procesando formulario' })
+        body: JSON.stringify({ 
+          error: 'Error procesando formulario',
+          details: parseError.message
+        })
       };
     }
 
     const { fields, files } = formData;
     const { nombre, dni, correo, telefono, direccion, empresa, talla } = fields;
 
+    console.log('📊 Datos recibidos:', { nombre, dni, correo, empresa });
+
     // PASO 2: Validaciones (RÁPIDO)
     if (!nombre || !dni || !correo || !telefono || !direccion || !empresa || !talla) {
+      console.log('❌ Faltan campos obligatorios');
       return {
         statusCode: 400,
         headers,
@@ -498,6 +587,7 @@ exports.handler = async (event, context) => {
     }
 
     if (!files.dniDelante || !files.dniDetras) {
+      console.log('❌ Faltan archivos DNI');
       return {
         statusCode: 400,
         headers,
@@ -507,6 +597,7 @@ exports.handler = async (event, context) => {
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(correo)) {
+      console.log('❌ Email inválido:', correo);
       return {
         statusCode: 400,
         headers,
@@ -553,6 +644,7 @@ exports.handler = async (event, context) => {
       const existingWorker = existingRows.find(row => row[0] === dni || row[1] === correo);
 
       if (existingWorker) {
+        console.log('❌ Trabajador ya existe:', dni, correo);
         return {
           statusCode: 409,
           headers,
@@ -565,14 +657,24 @@ exports.handler = async (event, context) => {
 
     console.log(`⏱️ Validaciones completadas en ${Date.now() - startTime}ms`);
 
-    // PASO 5: Crear archivos temporales (RÁPIDO)
+    // PASO 5: Crear archivos temporales (MEJORADO para móvil)
     const timestamp = Date.now();
     const dniDelantePath = path.join(os.tmpdir(), `dni_delante_${timestamp}.jpg`);
     const dniDetrasPath = path.join(os.tmpdir(), `dni_detras_${timestamp}.jpg`);
     
-    fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
-    fs.writeFileSync(dniDetrasPath, files.dniDetras.buffer);
-    tempFilePaths = [dniDelantePath, dniDetrasPath];
+    try {
+      fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
+      fs.writeFileSync(dniDetrasPath, files.dniDetras.buffer);
+      tempFilePaths = [dniDelantePath, dniDetrasPath];
+      console.log('✅ Archivos temporales creados');
+    } catch (fileError) {
+      console.error('❌ Error creando archivos temporales:', fileError.message);
+      return {
+        statusCode: 500,
+        headers,
+        body: JSON.stringify({ error: 'Error procesando archivos' })
+      };
+    }
 
     const dniDelanteFile = {
       path: dniDelantePath,
@@ -589,6 +691,7 @@ exports.handler = async (event, context) => {
     // PASO 6: Obtener info carpeta padre (RÁPIDO)
     const parentFolderInfo = await getFileInfo(drive, process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID);
     if (!parentFolderInfo) {
+      console.log('❌ No se pudo acceder a la carpeta padre');
       return {
         statusCode: 500,
         headers,
@@ -725,12 +828,15 @@ exports.handler = async (event, context) => {
 
   } catch (error) {
     console.error('❌ Error general:', error.message);
+    console.error('❌ Stack trace:', error.stack);
+    
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
         error: 'Error interno del servidor',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        details: process.env.NODE_ENV === 'development' ? error.message : 'Error procesando solicitud',
+        timestamp: new Date().toISOString()
       })
     };
   } finally {
@@ -739,10 +845,13 @@ exports.handler = async (event, context) => {
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
+          console.log('🧹 Archivo temporal eliminado:', filePath);
         }
       } catch (cleanupError) {
-        console.warn(`Error limpiando: ${filePath}`);
+        console.warn(`⚠️ Error limpiando: ${filePath}`);
       }
     });
+    
+    console.log(`⏱️ Proceso total completado en ${Date.now() - startTime}ms`);
   }
 };
