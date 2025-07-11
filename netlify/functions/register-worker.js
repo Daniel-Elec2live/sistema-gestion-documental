@@ -490,96 +490,136 @@ function parseFormData(event) {
         return;
       }
       
-      // CORRECCIÓN PROBLEMA 3: Configuración optimizada para móviles
-      const form = new multiparty.Form({
-        maxFilesSize: 100 * 1024 * 1024, // 100MB máximo (aumentado para móviles)
-        maxFields: 50, // Más campos permitidos
-        maxFieldsSize: 20 * 1024 * 1024, // 20MB para campos
-        autoFields: true,
-        autoFiles: true,
-        uploadDir: os.tmpdir(),
-        // CORRECCIÓN: Opciones adicionales para móviles
-        encoding: 'utf8',
-        hash: false, // Deshabilitar hash para mayor velocidad
-        multiples: false
-      });
-      
-      // Crear buffer del body con mejor manejo de errores
+      // CORRECCIÓN CRÍTICA: Crear buffer correctamente según encoding
       let bodyBuffer;
       try {
         if (event.isBase64Encoded) {
+          console.log('📦 Decodificando desde base64...');
           bodyBuffer = Buffer.from(event.body, 'base64');
         } else {
-          bodyBuffer = Buffer.from(event.body, 'binary');
+          console.log('📦 Procesando como string...');
+          // CORRECCIÓN: Usar 'utf8' en lugar de 'binary' para mejor compatibilidad
+          bodyBuffer = Buffer.from(event.body, 'utf8');
         }
         console.log('📦 Buffer creado, tamaño:', bodyBuffer.length);
+        console.log('📦 Primeros bytes:', bodyBuffer.slice(0, 100).toString());
       } catch (bufferError) {
         console.error('❌ Error creando buffer:', bufferError);
         reject(new Error('Error procesando datos del formulario'));
         return;
       }
 
+      // CORRECCIÓN CRÍTICA: Usar un enfoque más directo con multiparty
       const { Readable } = require('stream');
-      const bodyStream = new Readable({
-        read() {},
-        // CORRECCIÓN PROBLEMA 3: Configuración optimizada para el stream
-        highWaterMark: 64 * 1024, // 64KB chunks para mejor rendimiento en móviles
-        objectMode: false
+      
+      // Crear stream del buffer
+      const bufferStream = new Readable({
+        read() {}
       });
       
-      // Push buffer al stream
-      bodyStream.push(bodyBuffer);
-      bodyStream.push(null);
-      
-      // CORRECCIÓN PROBLEMA 3: Headers críticos para móvil mejorados
-      bodyStream.headers = {
+      // CORRECCIÓN: Configurar headers correctamente en el stream
+      bufferStream.headers = {
         'content-type': contentType,
-        'content-length': bodyBuffer.length.toString(),
-        // Agregar headers adicionales para compatibilidad móvil
-        'transfer-encoding': 'chunked'
+        'content-length': bodyBuffer.length
       };
-
-      // CORRECCIÓN PROBLEMA 3: Timeout más largo para móviles
-      const parseTimeout = setTimeout(() => {
-        reject(new Error('Timeout parseando FormData (móvil)'));
-      }, 60000); // 60 segundos para móviles
-
-      form.parse(bodyStream, (err, fields, files) => {
-        clearTimeout(parseTimeout);
-        
-        if (err) {
-          console.error('❌ Error parseando FormData:', err);
-          reject(err);
-          return;
-        }
-
-        console.log('✅ FormData parseado correctamente');
-        console.log('📊 Campos:', Object.keys(fields));
-        console.log('📊 Archivos:', Object.keys(files));
-
-        // Convertir arrays de campos a valores simples
-        const cleanFields = {};
-        for (const [key, value] of Object.entries(fields)) {
-          cleanFields[key] = Array.isArray(value) ? value[0] : value;
-        }
-
-        // Procesar archivos con validación mejorada
-        const cleanFiles = {};
-        for (const [key, fileArray] of Object.entries(files)) {
-          const file = Array.isArray(fileArray) ? fileArray[0] : fileArray;
-          if (file && file.path && fs.existsSync(file.path)) {
-            cleanFiles[key] = {
-              path: file.path,
-              originalFilename: file.originalFilename || `${key}.jpg`,
-              headers: file.headers || { 'content-type': 'application/octet-stream' },
-              size: file.size || 0
-            };
-            console.log(`📁 Archivo ${key} procesado: ${file.size} bytes`);
-          }
-        }
-
-        resolve({ fields: cleanFields, files: cleanFiles });
+      
+      // Push data y cerrar stream
+      bufferStream.push(bodyBuffer);
+      bufferStream.push(null); // EOF
+      
+      // CORRECCIÓN PROBLEMA 3: Configuración más robusta para multiparty
+      const form = new multiparty.Form({
+        maxFilesSize: 100 * 1024 * 1024, // 100MB
+        maxFields: 50,
+        maxFieldsSize: 20 * 1024 * 1024,
+        autoFields: true,
+        autoFiles: true,
+        uploadDir: os.tmpdir(),
+        encoding: 'utf8',
+        hash: false,
+        multiples: false,
+        // CORRECCIÓN: Configuraciones adicionales para estabilidad
+        defer: false,
       });
+
+      // CORRECCIÓN: Timeout con cleanup
+      const parseTimeout = setTimeout(() => {
+        console.error('❌ Timeout en parseFormData después de 45 segundos');
+        reject(new Error('Timeout parseando FormData'));
+      }, 45000); // 45 segundos
+
+      // CORRECCIÓN: Manejo de errores mejorado
+      form.on('error', (err) => {
+        clearTimeout(parseTimeout);
+        console.error('❌ Error en multiparty form:', err);
+        reject(err);
+      });
+
+      // CORRECCIÓN: Parse con mejor manejo
+      try {
+        console.log('🔄 Iniciando parse con multiparty...');
+        
+        form.parse(bufferStream, (err, fields, files) => {
+          clearTimeout(parseTimeout);
+          
+          if (err) {
+            console.error('❌ Error parseando FormData:', err);
+            console.error('❌ Error stack:', err.stack);
+            reject(new Error(`Error parseando FormData: ${err.message}`));
+            return;
+          }
+
+          console.log('✅ FormData parseado correctamente');
+          console.log('📊 Campos encontrados:', Object.keys(fields || {}));
+          console.log('📊 Archivos encontrados:', Object.keys(files || {}));
+
+          // CORRECCIÓN: Manejo más robusto de campos
+          const cleanFields = {};
+          if (fields) {
+            for (const [key, value] of Object.entries(fields)) {
+              cleanFields[key] = Array.isArray(value) ? value[0] : value;
+              console.log(`📝 Campo ${key}:`, cleanFields[key] ? 'OK' : 'VACÍO');
+            }
+          }
+
+          // CORRECCIÓN: Manejo más robusto de archivos
+          const cleanFiles = {};
+          if (files) {
+            for (const [key, fileArray] of Object.entries(files)) {
+              const file = Array.isArray(fileArray) ? fileArray[0] : fileArray;
+              
+              if (file) {
+                console.log(`📁 Procesando archivo ${key}:`, {
+                  path: file.path,
+                  size: file.size,
+                  originalFilename: file.originalFilename,
+                  exists: file.path ? fs.existsSync(file.path) : false
+                });
+                
+                if (file.path && fs.existsSync(file.path)) {
+                  cleanFiles[key] = {
+                    path: file.path,
+                    originalFilename: file.originalFilename || `${key}.jpg`,
+                    headers: file.headers || { 'content-type': 'application/octet-stream' },
+                    size: file.size || 0
+                  };
+                  console.log(`✅ Archivo ${key} procesado: ${file.size} bytes`);
+                } else {
+                  console.error(`❌ Archivo ${key} no encontrado en path:`, file.path);
+                }
+              }
+            }
+          }
+
+          console.log('📊 Resultado final - Campos:', Object.keys(cleanFields).length, 'Archivos:', Object.keys(cleanFiles).length);
+          resolve({ fields: cleanFields, files: cleanFiles });
+        });
+        
+      } catch (parseError) {
+        clearTimeout(parseTimeout);
+        console.error('❌ Error crítico en parse:', parseError);
+        reject(parseError);
+      }
       
     } catch (error) {
       console.error('❌ Error crítico en parseFormData:', error);
@@ -668,7 +708,28 @@ exports.handler = async (event, context) => {
         };
       } else if (contentType.includes('multipart/form-data')) {
         console.log('📎 Parseando FormData...');
-        formData = await parseFormData(event);
+        
+        try {
+          formData = await parseFormData(event);
+          console.log('✅ FormData parseado exitosamente');
+          console.log('📊 Resumen - Campos:', Object.keys(formData.fields).length, 'Archivos:', Object.keys(formData.files).length);
+          
+          // Debug detallado de los datos recibidos
+          console.log('📋 Campos recibidos:', Object.keys(formData.fields));
+          for (const [key, value] of Object.entries(formData.fields)) {
+            console.log(`  - ${key}: ${value ? (value.length > 50 ? `${value.substring(0, 50)}...` : value) : 'VACÍO'}`);
+          }
+          
+          console.log('📁 Archivos recibidos:', Object.keys(formData.files));
+          for (const [key, file] of Object.entries(formData.files)) {
+            console.log(`  - ${key}: ${file ? `${file.size} bytes, ${file.originalFilename}` : 'NO ENCONTRADO'}`);
+          }
+          
+        } catch (parseError) {
+          console.error('❌ Error específico en parseFormData:', parseError.message);
+          console.error('❌ Stack del error:', parseError.stack);
+          throw parseError; // Re-lanzar para que sea capturado por el catch principal
+        }
       } else {
         console.log('❌ Content-type no soportado:', contentType);
         return {
@@ -704,7 +765,17 @@ exports.handler = async (event, context) => {
     const { fields, files } = formData;
     const { nombre, dni, correo, telefono, direccion, empresa, talla } = fields;
 
-    console.log('📊 Datos recibidos:', { nombre, dni, correo, empresa });
+    console.log('📊 Datos extraídos para validación:');
+    console.log('  - nombre:', nombre ? '✅' : '❌');
+    console.log('  - dni:', dni ? '✅' : '❌');
+    console.log('  - correo:', correo ? '✅' : '❌');
+    console.log('  - telefono:', telefono ? '✅' : '❌');
+    console.log('  - direccion:', direccion ? '✅' : '❌');
+    console.log('  - empresa:', empresa ? '✅' : '❌');
+    console.log('  - talla:', talla ? '✅' : '❌');
+    console.log('📊 Archivos para validación:');
+    console.log('  - dniDelante:', files.dniDelante ? '✅' : '❌');
+    console.log('  - dniDetras:', files.dniDetras ? '✅' : '❌');
 
     // PASO 2: Validaciones (RÁPIDO)
     if (!nombre || !dni || !correo || !telefono || !direccion || !empresa || !talla) {

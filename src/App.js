@@ -43,7 +43,7 @@ const LoadingSpinner = ({ message = 'Procesando...' }) => (
         color: '#ccc',
         marginTop: '10px',
         fontSize: '14px'
-      }}>Esto puede tardar un más en móvil...</p>
+      }}>Esto puede tardar un poco más en móvil...</p>
     )}
   </div>
 );
