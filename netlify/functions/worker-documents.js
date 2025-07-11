@@ -216,20 +216,28 @@ exports.handler = async (event, context) => {
           q: `'${folderId}' in parents and trashed=false`,
           fields: 'files(id, name, createdTime, modifiedTime, webViewLink, mimeType, size)',
           orderBy: 'name,createdTime desc',
-          pageSize: 100, // Limitar resultados
+          pageSize: 100,
           supportsAllDrives: true,
           includeItemsFromAllDrives: true
         };
 
-        // Agregar driveId y corpora si la carpeta está en un Shared Drive
+        // CORRECCIÓN CRÍTICA: Configurar correctamente corpora y driveId
         if (carpetaInfo.driveId) {
           listParams.driveId = carpetaInfo.driveId;
-          listParams.corpora = 'drive'; // CRÍTICO: Agregar corpora
+          listParams.corpora = 'drive'; // Usar 'drive' para Shared Drives
+        } else {
+          listParams.corpora = 'user'; // Usar 'user' para My Drive
         }
+
+        console.log(`📊 Parámetros de búsqueda para ${folderName}:`, {
+          driveId: listParams.driveId,
+          corpora: listParams.corpora,
+          folderId: folderId
+        });
 
         const listResponse = await Promise.race([
           drive.files.list(listParams),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout listando archivos')), 8000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout listando archivos')), 10000))
         ]);
 
         const files = listResponse.data.files || [];
@@ -244,14 +252,6 @@ exports.handler = async (event, context) => {
           for (const file of existingFolders) {
             processedFolderNames.add(file.name);
             
-            const subfolderData = {
-              nombre: file.name,
-              documentos: [],
-              subcarpetas: [],
-              id: file.id,
-              hasContent: true
-            };
-            
             // Solo procesar subcarpetas si no hemos alcanzado la profundidad máxima
             if (currentDepth < maxDepth) {
               console.log(`📁 Procesando subcarpeta existente: ${file.name}`);
@@ -262,12 +262,24 @@ exports.handler = async (event, context) => {
                 currentDepth + 1
               ).catch(err => {
                 console.error(`❌ Error procesando subcarpeta ${file.name}:`, err);
-                return subfolderData; // Devolver estructura vacía si falla
+                return {
+                  nombre: file.name,
+                  documentos: [],
+                  subcarpetas: [],
+                  id: file.id,
+                  hasContent: true
+                };
               });
               
               folderData.subcarpetas.push(subfolderContent);
             } else {
-              folderData.subcarpetas.push(subfolderData);
+              folderData.subcarpetas.push({
+                nombre: file.name,
+                documentos: [],
+                subcarpetas: [],
+                id: file.id,
+                hasContent: true
+              });
             }
           }
 
@@ -279,55 +291,16 @@ exports.handler = async (event, context) => {
                 nombre: expectedFolder,
                 documentos: [],
                 subcarpetas: [],
-                id: null, // No tiene ID porque no existe
+                id: null,
                 hasContent: false
               });
             }
           }
-
-          // Procesar otras carpetas que no están en la lista esperada
-          for (const file of existingFolders) {
-            if (!expectedFolders.includes(file.name) && !processedFolderNames.has(file.name)) {
-              console.log(`📁 Procesando carpeta adicional: ${file.name}`);
-              const subfolderData = {
-                nombre: file.name,
-                documentos: [],
-                subcarpetas: [],
-                id: file.id,
-                hasContent: true
-              };
-              
-              if (currentDepth < maxDepth) {
-                const subfolderContent = await getDocumentsFromFolder(
-                  file.id, 
-                  file.name, 
-                  maxDepth, 
-                  currentDepth + 1
-                ).catch(err => {
-                  console.error(`❌ Error procesando carpeta adicional ${file.name}:`, err);
-                  return subfolderData;
-                });
-                
-                folderData.subcarpetas.push(subfolderContent);
-              } else {
-                folderData.subcarpetas.push(subfolderData);
-              }
-            }
-          }
         } else {
-          // Para subcarpetas normales, procesar como antes
+          // Para subcarpetas normales, procesar carpetas y documentos
           for (const file of files) {
             if (file.mimeType === 'application/vnd.google-apps.folder') {
               // Es una carpeta
-              const subfolderData = {
-                nombre: file.name,
-                documentos: [],
-                subcarpetas: [],
-                id: file.id,
-                hasContent: true
-              };
-              
-              // Solo procesar subcarpetas si no hemos alcanzado la profundidad máxima
               if (currentDepth < maxDepth) {
                 console.log(`📁 Procesando subcarpeta: ${file.name}`);
                 const subfolderContent = await getDocumentsFromFolder(
@@ -337,12 +310,24 @@ exports.handler = async (event, context) => {
                   currentDepth + 1
                 ).catch(err => {
                   console.error(`❌ Error procesando subcarpeta ${file.name}:`, err);
-                  return subfolderData; // Devolver estructura vacía si falla
+                  return {
+                    nombre: file.name,
+                    documentos: [],
+                    subcarpetas: [],
+                    id: file.id,
+                    hasContent: true
+                  };
                 });
                 
                 folderData.subcarpetas.push(subfolderContent);
               } else {
-                folderData.subcarpetas.push(subfolderData);
+                folderData.subcarpetas.push({
+                  nombre: file.name,
+                  documentos: [],
+                  subcarpetas: [],
+                  id: file.id,
+                  hasContent: true
+                });
               }
             }
           }
@@ -385,6 +370,8 @@ exports.handler = async (event, context) => {
 
         // Ordenar documentos por fecha de creación (más recientes primero)
         folderData.documentos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+
+        console.log(`✅ Carpeta ${folderName} procesada: ${folderData.documentos.length} documentos, ${folderData.subcarpetas.length} subcarpetas`);
 
       } catch (error) {
         console.error(`❌ Error procesando carpeta ${folderName}:`, error);
