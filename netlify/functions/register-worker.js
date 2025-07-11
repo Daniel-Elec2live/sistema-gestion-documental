@@ -110,41 +110,33 @@ async function parseFormDataSimple(event) {
       
       console.log(`📦 Buffer creado: ${bodyBuffer.length} bytes`);
 
-      // CORRECCIÓN: Configuración más simple y robusta
+      // CORRECCIÓN: Usar Readable stream nativo en lugar de objeto fake
+      const { Readable } = require('stream');
+      
+      const bodyStream = new Readable({
+        read() {}
+      });
+      
+      // Configurar headers en el stream
+      bodyStream.headers = {
+        'content-type': contentType,
+        'content-length': bodyBuffer.length.toString()
+      };
+      
+      // Push data al stream
+      bodyStream.push(bodyBuffer);
+      bodyStream.push(null); // EOF
+
+      // CORRECCIÓN: Configuración mejorada para multiparty
       const form = new multiparty.Form({
         maxFilesSize: 50 * 1024 * 1024, // 50MB
         maxFields: 20,
         maxFieldsSize: 10 * 1024 * 1024,
         autoFields: true,
         autoFiles: true,
-        uploadDir: os.tmpdir()
+        uploadDir: os.tmpdir(),
+        encoding: 'utf8'
       });
-
-      // Crear request-like object que multiparty espera
-      const fakeReq = {
-        headers: {
-          'content-type': contentType,
-          'content-length': bodyBuffer.length.toString()
-        },
-        method: 'POST',
-        url: '/',
-        body: bodyBuffer,
-        pipe: function(destination) {
-          destination.write(bodyBuffer);
-          destination.end();
-          return destination;
-        },
-        on: function(event, callback) {
-          if (event === 'data') {
-            callback(bodyBuffer);
-          } else if (event === 'end') {
-            callback();
-          }
-        },
-        pause: function() {},
-        resume: function() {},
-        readable: true
-      };
 
       // Timeout para el parseo
       const timeout = setTimeout(() => {
@@ -152,9 +144,17 @@ async function parseFormDataSimple(event) {
         reject(new Error('Timeout parsing form data'));
       }, 30000);
 
+      // CORRECCIÓN: Manejo de errores del form
+      form.on('error', (error) => {
+        clearTimeout(timeout);
+        console.error('❌ Error en form.parse:', error);
+        reject(error);
+      });
+
       console.log('🔄 Iniciando parse...');
       
-      form.parse(fakeReq, (err, fields, files) => {
+      // CORRECCIÓN: Usar el stream directamente
+      form.parse(bodyStream, (err, fields, files) => {
         clearTimeout(timeout);
         
         if (err) {
