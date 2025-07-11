@@ -43,7 +43,7 @@ const LoadingSpinner = ({ message = 'Procesando...' }) => (
         color: '#ccc',
         marginTop: '10px',
         fontSize: '14px'
-      }}>Esto puede tardar un momento en móvil...</p>
+      }}>Esto puede tardar un más en móvil...</p>
     )}
   </div>
 );
@@ -535,10 +535,9 @@ function App() {
                 <div key={`doc-${index}-${doc.id || index}`} className="document-item">
                   <div className="doc-info">
                     <h4>{doc.nombre}</h4>
-                    <p>📅 Fecha: {doc.fecha}</p>
-                    <p>🏷️ Tipo: <span className="doc-type">{doc.tipo}</span></p>
-                    <p>📊 Estado: <span className={`status ${doc.estado.toLowerCase()}`}>{doc.estado}</span></p>
-                    {doc.tamaño && <p>📏 Tamaño: {doc.tamaño}</p>}
+                    <p>Fecha: {doc.fecha}</p>
+                    <p>Tipo: <span className="doc-type">{doc.tipo}</span></p>
+                    {doc.tamaño && <p>Tamaño: {doc.tamaño}</p>}
                   </div>
                   {doc.url && (
                     <a href={doc.url} target="_blank" rel="noopener noreferrer" className="view-btn">

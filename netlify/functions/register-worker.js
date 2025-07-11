@@ -334,7 +334,7 @@ IMPORTANTE: Es posible que hayas recibido una notificación de Google Drive sobr
 }
 
 // Función OPTIMIZADA para permisos (sin bloquear proceso principal)
-function grantPermissionsAsync(drive, carpetaId, subcarpetasIds, workerEmail, documentosPersonalesId) {
+function grantPermissionsAsync(drive, carpetaId, subcarpetasIds, correo, documentosPersonalesId) {
   // Procesar permisos en background
   setImmediate(async () => {
     try {
@@ -346,7 +346,7 @@ function grantPermissionsAsync(drive, carpetaId, subcarpetasIds, workerEmail, do
       permissionPromises.push(
         drive.permissions.create({
           fileId: carpetaId,
-          resource: { role: 'reader', type: 'user', emailAddress: workerEmail },
+          resource: { role: 'reader', type: 'user', emailAddress: correo },
           supportsAllDrives: true,
           sendNotificationEmail: false // Sin notificación para acelerar
         }).catch(err => console.error('Error permiso principal:', err.message))
@@ -358,7 +358,7 @@ function grantPermissionsAsync(drive, carpetaId, subcarpetasIds, workerEmail, do
           permissionPromises.push(
             drive.permissions.create({
               fileId: subcarpeta.id,
-              resource: { role: 'reader', type: 'user', emailAddress: workerEmail },
+              resource: { role: 'reader', type: 'user', emailAddress: correo },
               supportsAllDrives: true,
               sendNotificationEmail: false
             }).catch(err => console.error(`Error permiso ${subcarpeta.nombre}:`, err.message))
@@ -371,7 +371,7 @@ function grantPermissionsAsync(drive, carpetaId, subcarpetasIds, workerEmail, do
         permissionPromises.push(
           drive.permissions.create({
             fileId: documentosPersonalesId,
-            resource: { role: 'reader', type: 'user', emailAddress: workerEmail },
+            resource: { role: 'reader', type: 'user', emailAddress: correo },
             supportsAllDrives: true,
             sendNotificationEmail: true // Solo esta notificación
           }).catch(err => console.error('Error permiso Documentos Personales:', err.message))
