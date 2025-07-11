@@ -37,14 +37,15 @@ async function getFileInfo(drive, fileId) {
   }
 }
 
-// CORRECCIÓN PROBLEMA 1: Configurar Nodemailer con mejor manejo de errores
+// CORRECCIÓN PROBLEMA 1: Configurar Nodemailer con la sintaxis correcta
 let transporter = null;
 let transporterReady = false;
 
 async function initializeTransporter() {
   try {
     if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-      transporter = nodemailer.createTransporter({
+      // CORRECCIÓN: createTransport (sin 'er') para nodemailer 6.x/7.x
+      transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST,
         port: parseInt(process.env.SMTP_PORT) || 587,
         secure: process.env.SMTP_SECURE === 'true',
@@ -55,14 +56,14 @@ async function initializeTransporter() {
         tls: {
           rejectUnauthorized: false
         },
-        connectionTimeout: 60000, // 60 segundos
+        connectionTimeout: 60000,
         socketTimeout: 60000,
         pool: true,
         maxConnections: 5,
         maxMessages: 100
       });
       
-      // CORRECCIÓN: Verificar conexión con timeout más largo
+      // CORRECCIÓN: Verificar conexión con timeout
       await Promise.race([
         transporter.verify(),
         new Promise((_, reject) => 
@@ -83,6 +84,118 @@ async function initializeTransporter() {
     transporterReady = false;
     return false;
   }
+}
+
+// CORRECCIÓN PROBLEMA 3: Función simplificada para parsear FormData
+async function parseFormDataSimple(event) {
+  return new Promise((resolve, reject) => {
+    console.log('🔄 Iniciando parseFormDataSimple...');
+    
+    try {
+      const contentType = event.headers['content-type'] || event.headers['Content-Type'] || '';
+      
+      if (!contentType.includes('multipart/form-data')) {
+        throw new Error('Content-Type debe ser multipart/form-data');
+      }
+
+      // Crear buffer del body
+      let bodyBuffer;
+      if (event.isBase64Encoded) {
+        bodyBuffer = Buffer.from(event.body, 'base64');
+        console.log('📦 Decodificado desde base64');
+      } else {
+        bodyBuffer = Buffer.from(event.body, 'binary');
+        console.log('📦 Procesado como binary');
+      }
+      
+      console.log(`📦 Buffer creado: ${bodyBuffer.length} bytes`);
+
+      // CORRECCIÓN: Configuración más simple y robusta
+      const form = new multiparty.Form({
+        maxFilesSize: 50 * 1024 * 1024, // 50MB
+        maxFields: 20,
+        maxFieldsSize: 10 * 1024 * 1024,
+        autoFields: true,
+        autoFiles: true,
+        uploadDir: os.tmpdir()
+      });
+
+      // Crear request-like object que multiparty espera
+      const fakeReq = {
+        headers: {
+          'content-type': contentType,
+          'content-length': bodyBuffer.length.toString()
+        },
+        method: 'POST',
+        url: '/',
+        body: bodyBuffer,
+        pipe: function(destination) {
+          destination.write(bodyBuffer);
+          destination.end();
+          return destination;
+        },
+        on: function(event, callback) {
+          if (event === 'data') {
+            callback(bodyBuffer);
+          } else if (event === 'end') {
+            callback();
+          }
+        },
+        pause: function() {},
+        resume: function() {},
+        readable: true
+      };
+
+      // Timeout para el parseo
+      const timeout = setTimeout(() => {
+        console.error('❌ Timeout en parseFormData');
+        reject(new Error('Timeout parsing form data'));
+      }, 30000);
+
+      console.log('🔄 Iniciando parse...');
+      
+      form.parse(fakeReq, (err, fields, files) => {
+        clearTimeout(timeout);
+        
+        if (err) {
+          console.error('❌ Error en multiparty:', err);
+          reject(err);
+          return;
+        }
+
+        console.log('✅ Parse completado');
+        console.log('📊 Fields keys:', Object.keys(fields || {}));
+        console.log('📊 Files keys:', Object.keys(files || {}));
+
+        // Limpiar campos
+        const cleanFields = {};
+        for (const [key, value] of Object.entries(fields || {})) {
+          cleanFields[key] = Array.isArray(value) ? value[0] : value;
+        }
+
+        // Limpiar archivos
+        const cleanFiles = {};
+        for (const [key, fileArray] of Object.entries(files || {})) {
+          const file = Array.isArray(fileArray) ? fileArray[0] : fileArray;
+          if (file && file.path && fs.existsSync(file.path)) {
+            cleanFiles[key] = {
+              path: file.path,
+              originalFilename: file.originalFilename || `${key}.jpg`,
+              headers: file.headers || { 'content-type': 'image/jpeg' },
+              size: file.size || 0
+            };
+            console.log(`📁 Archivo ${key}: ${file.size} bytes`);
+          }
+        }
+
+        resolve({ fields: cleanFields, files: cleanFiles });
+      });
+
+    } catch (error) {
+      console.error('❌ Error crítico en parseFormData:', error);
+      reject(error);
+    }
+  });
 }
 
 // Función SUPER OPTIMIZADA para subir DNIs Y crear carpeta
@@ -106,7 +219,7 @@ async function uploadDNIImagesOptimized(drive, carpetaId, dniDelanteFile, dniDet
     uploadedFiles.documentosPersonalesFolderId = documentosPersonalesFolderId;
     console.log('✅ Carpeta "Documentos Personales" creada:', documentosPersonalesFolderId);
 
-    // PASO 2: Subir archivos DNI EN PARALELO (máximo 2 archivos)
+    // PASO 2: Subir archivos DNI EN PARALELO
     const uploadPromises = [];
 
     // Subir DNI Delante
@@ -161,10 +274,10 @@ async function uploadDNIImagesOptimized(drive, carpetaId, dniDelanteFile, dniDet
       );
     }
 
-    // CORRECCIÓN PROBLEMA 3: Timeout más largo para móviles
+    // Esperar subidas con timeout más largo
     await Promise.race([
       Promise.all(uploadPromises),
-      new Promise(resolve => setTimeout(resolve, 30000)) // 30 segundos para móviles
+      new Promise(resolve => setTimeout(resolve, 30000))
     ]);
 
     console.log('✅ Proceso de DNIs completado');
@@ -177,7 +290,7 @@ async function uploadDNIImagesOptimized(drive, carpetaId, dniDelanteFile, dniDet
   return uploadedFiles;
 }
 
-// CORRECCIÓN PROBLEMA 1: Función mejorada para enviar email de forma síncrona
+// CORRECCIÓN PROBLEMA 1: Función para enviar email de forma síncrona
 async function sendConfirmationEmailSync(correo, nombre, empresa, carpetaUrl = null) {
   if (!transporter || !transporterReady) {
     console.warn('⚠️ Transporter no está listo, inicializando...');
@@ -266,46 +379,13 @@ async function sendConfirmationEmailSync(correo, nombre, empresa, carpetaUrl = n
                 </table>
               </div>
               
-              <!-- Features -->
-              <div style="margin: 30px 0;">
-                <h3 style="color: #333; margin-bottom: 20px; font-size: 18px;">🚀 ¿Qué puedes hacer ahora?</h3>
-                <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
-                  <ul style="margin: 0; padding-left: 20px; color: #666;">
-                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Acceder a tu carpeta personal desde Google Drive</li>
-                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Ver y descargar tus documentos personales</li>
-                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Consultar nóminas, contratos y certificados</li>
-                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Recibir notificaciones de nuevos archivos</li>
-                    <li style="margin-bottom: 0; line-height: 1.6;">✅ Gestionar y revisar tus documentos laborales</li>
-                  </ul>
-                </div>
-              </div>
-              
-              <!-- Important Note -->
-              <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 30px 0;">
-                <h4 style="color: #856404; margin: 0 0 10px 0; font-size: 16px;">📧 Importante</h4>
-                <p style="color: #856404; margin: 0; font-size: 14px; line-height: 1.5;">
-                  Es posible que hayas recibido una notificación de Google Drive sobre el acceso a tu carpeta. 
-                  Esto es normal y confirma que ya puedes acceder a tus documentos.
-                </p>
-              </div>
-              
               <!-- CTA Button -->
               <div style="text-align: center; margin: 40px 0;">
                 <a href="${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}" 
-                   style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s;">
+                   style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px;">
                   🔗 Acceder al Sistema
                 </a>
               </div>
-            </div>
-            
-            <!-- Footer -->
-            <div style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #dee2e6;">
-              <p style="color: #6c757d; font-size: 12px; margin: 0 0 10px 0;">
-                Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
-              </p>
-              <p style="color: #868e96; font-size: 11px; margin: 0;">
-                Por favor, no respondas a este mensaje. © ${new Date().getFullYear()} Sistema de Gestión Documental.
-              </p>
             </div>
           </div>
         </body>
@@ -316,36 +396,20 @@ async function sendConfirmationEmailSync(correo, nombre, empresa, carpetaUrl = n
 
 Hola ${nombre},
 
-Te confirmamos que tu registro se ha completado exitosamente y ya tienes acceso a tu carpeta personal de documentos.
+Tu registro se ha completado exitosamente.
 
-DATOS DE TU REGISTRO:
+Datos de registro:
 • Nombre: ${nombre}
 • Empresa: ${empresa}
 • Email: ${correo}
 • Fecha: ${fechaRegistro}
 
-${carpetaUrl ? `
-TU CARPETA PERSONAL:
-${carpetaUrl}
-` : ''}
+${carpetaUrl ? `Tu carpeta personal: ${carpetaUrl}` : ''}
 
-¿QUÉ PUEDES HACER AHORA?
-✅ Acceder a tu carpeta personal desde Google Drive
-✅ Ver y descargar tus documentos personales
-✅ Consultar nóminas, contratos y certificados
-✅ Recibir notificaciones de nuevos archivos
-✅ Gestionar y revisar tus documentos laborales
-
-ACCEDER AL SISTEMA:
-${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}
-
-IMPORTANTE: Es posible que hayas recibido una notificación de Google Drive sobre el acceso a tu carpeta. Esto es normal y confirma que ya puedes acceder a tus documentos.
-
-© ${new Date().getFullYear()} Sistema de Gestión Documental.
+Acceder al sistema: ${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}
       `
     };
 
-    // CORRECCIÓN: Enviar email con timeout apropiado
     const result = await Promise.race([
       transporter.sendMail(mailOptions),
       new Promise((_, reject) => 
@@ -374,7 +438,6 @@ async function grantPermissionsSync(drive, carpetaId, subcarpetasIds, correo, do
   };
 
   try {
-    // CORRECCIÓN: Permisos con reintentos y timeouts más largos
     const maxRetries = 3;
     const retryDelay = 2000;
 
@@ -385,7 +448,7 @@ async function grantPermissionsSync(drive, carpetaId, subcarpetasIds, correo, do
           await Promise.race([
             operation(),
             new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('Timeout')), 15000) // 15 segundos
+              setTimeout(() => reject(new Error('Timeout')), 15000)
             )
           ]);
           console.log(`✅ ${description} - intento ${i + 1}`);
@@ -417,7 +480,7 @@ async function grantPermissionsSync(drive, carpetaId, subcarpetasIds, correo, do
       'Permiso carpeta principal'
     );
 
-    // Permisos subcarpetas en lotes pequeños para evitar rate limits
+    // Permisos subcarpetas en lotes pequeños
     const batchSize = 2;
     for (let i = 0; i < subcarpetasIds.length; i += batchSize) {
       const batch = subcarpetasIds.slice(i, i + batchSize);
@@ -458,7 +521,7 @@ async function grantPermissionsSync(drive, carpetaId, subcarpetasIds, correo, do
             emailAddress: correo 
           },
           supportsAllDrives: true,
-          sendNotificationEmail: true // Solo esta notificación
+          sendNotificationEmail: true
         }),
         'Permiso Documentos Personales'
       );
@@ -474,165 +537,11 @@ async function grantPermissionsSync(drive, carpetaId, subcarpetasIds, correo, do
   return results;
 }
 
-// CORRECCIÓN PROBLEMA 3: Función mejorada para parsear FormData (optimizada para móviles)
-function parseFormData(event) {
-  return new Promise((resolve, reject) => {
-    try {
-      console.log('🔍 Headers recibidos:', JSON.stringify(event.headers, null, 2));
-      console.log('🔍 Body length:', event.body?.length || 0);
-      console.log('🔍 Is base64:', event.isBase64Encoded);
-      
-      const contentType = event.headers['content-type'] || event.headers['Content-Type'] || '';
-      console.log('🔍 Content-Type:', contentType);
-      
-      if (!contentType.includes('multipart/form-data')) {
-        reject(new Error('Content-Type debe ser multipart/form-data'));
-        return;
-      }
-      
-      // CORRECCIÓN CRÍTICA: Crear buffer correctamente según encoding
-      let bodyBuffer;
-      try {
-        if (event.isBase64Encoded) {
-          console.log('📦 Decodificando desde base64...');
-          bodyBuffer = Buffer.from(event.body, 'base64');
-        } else {
-          console.log('📦 Procesando como string...');
-          // CORRECCIÓN: Usar 'utf8' en lugar de 'binary' para mejor compatibilidad
-          bodyBuffer = Buffer.from(event.body, 'utf8');
-        }
-        console.log('📦 Buffer creado, tamaño:', bodyBuffer.length);
-        console.log('📦 Primeros bytes:', bodyBuffer.slice(0, 100).toString());
-      } catch (bufferError) {
-        console.error('❌ Error creando buffer:', bufferError);
-        reject(new Error('Error procesando datos del formulario'));
-        return;
-      }
-
-      // CORRECCIÓN CRÍTICA: Usar un enfoque más directo con multiparty
-      const { Readable } = require('stream');
-      
-      // Crear stream del buffer
-      const bufferStream = new Readable({
-        read() {}
-      });
-      
-      // CORRECCIÓN: Configurar headers correctamente en el stream
-      bufferStream.headers = {
-        'content-type': contentType,
-        'content-length': bodyBuffer.length
-      };
-      
-      // Push data y cerrar stream
-      bufferStream.push(bodyBuffer);
-      bufferStream.push(null); // EOF
-      
-      // CORRECCIÓN PROBLEMA 3: Configuración más robusta para multiparty
-      const form = new multiparty.Form({
-        maxFilesSize: 100 * 1024 * 1024, // 100MB
-        maxFields: 50,
-        maxFieldsSize: 20 * 1024 * 1024,
-        autoFields: true,
-        autoFiles: true,
-        uploadDir: os.tmpdir(),
-        encoding: 'utf8',
-        hash: false,
-        multiples: false,
-        // CORRECCIÓN: Configuraciones adicionales para estabilidad
-        defer: false,
-      });
-
-      // CORRECCIÓN: Timeout con cleanup
-      const parseTimeout = setTimeout(() => {
-        console.error('❌ Timeout en parseFormData después de 45 segundos');
-        reject(new Error('Timeout parseando FormData'));
-      }, 45000); // 45 segundos
-
-      // CORRECCIÓN: Manejo de errores mejorado
-      form.on('error', (err) => {
-        clearTimeout(parseTimeout);
-        console.error('❌ Error en multiparty form:', err);
-        reject(err);
-      });
-
-      // CORRECCIÓN: Parse con mejor manejo
-      try {
-        console.log('🔄 Iniciando parse con multiparty...');
-        
-        form.parse(bufferStream, (err, fields, files) => {
-          clearTimeout(parseTimeout);
-          
-          if (err) {
-            console.error('❌ Error parseando FormData:', err);
-            console.error('❌ Error stack:', err.stack);
-            reject(new Error(`Error parseando FormData: ${err.message}`));
-            return;
-          }
-
-          console.log('✅ FormData parseado correctamente');
-          console.log('📊 Campos encontrados:', Object.keys(fields || {}));
-          console.log('📊 Archivos encontrados:', Object.keys(files || {}));
-
-          // CORRECCIÓN: Manejo más robusto de campos
-          const cleanFields = {};
-          if (fields) {
-            for (const [key, value] of Object.entries(fields)) {
-              cleanFields[key] = Array.isArray(value) ? value[0] : value;
-              console.log(`📝 Campo ${key}:`, cleanFields[key] ? 'OK' : 'VACÍO');
-            }
-          }
-
-          // CORRECCIÓN: Manejo más robusto de archivos
-          const cleanFiles = {};
-          if (files) {
-            for (const [key, fileArray] of Object.entries(files)) {
-              const file = Array.isArray(fileArray) ? fileArray[0] : fileArray;
-              
-              if (file) {
-                console.log(`📁 Procesando archivo ${key}:`, {
-                  path: file.path,
-                  size: file.size,
-                  originalFilename: file.originalFilename,
-                  exists: file.path ? fs.existsSync(file.path) : false
-                });
-                
-                if (file.path && fs.existsSync(file.path)) {
-                  cleanFiles[key] = {
-                    path: file.path,
-                    originalFilename: file.originalFilename || `${key}.jpg`,
-                    headers: file.headers || { 'content-type': 'application/octet-stream' },
-                    size: file.size || 0
-                  };
-                  console.log(`✅ Archivo ${key} procesado: ${file.size} bytes`);
-                } else {
-                  console.error(`❌ Archivo ${key} no encontrado en path:`, file.path);
-                }
-              }
-            }
-          }
-
-          console.log('📊 Resultado final - Campos:', Object.keys(cleanFields).length, 'Archivos:', Object.keys(cleanFiles).length);
-          resolve({ fields: cleanFields, files: cleanFiles });
-        });
-        
-      } catch (parseError) {
-        clearTimeout(parseTimeout);
-        console.error('❌ Error crítico en parse:', parseError);
-        reject(parseError);
-      }
-      
-    } catch (error) {
-      console.error('❌ Error crítico en parseFormData:', error);
-      reject(error);
-    }
-  });
-}
-
 exports.handler = async (event, context) => {
   // CORRECCIÓN PROBLEMA 3: Timeout más largo para móviles
   context.callbackWaitsForEmptyEventLoop = false;
   
-  // CORS headers mejorados para móvil
+  // CORS headers mejorados
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type, Content-Length, Authorization',
@@ -641,7 +550,6 @@ exports.handler = async (event, context) => {
     'Content-Type': 'application/json'
   };
 
-  // Log inicial para debug
   console.log('🚀 INICIO - Proceso optimizado de registro');
   console.log('📱 User-Agent:', event.headers['user-agent'] || 'No disponible');
   console.log('🌐 Método:', event.httpMethod);
@@ -665,16 +573,17 @@ exports.handler = async (event, context) => {
   const startTime = Date.now();
 
   try {
-    // CORRECCIÓN PROBLEMA 1: Inicializar transporter al inicio
+    // CORRECCIÓN PROBLEMA 1: Inicializar transporter al inicio (sin bloquear si falla)
     console.log('📧 Inicializando sistema de email...');
-    await initializeTransporter();
+    await initializeTransporter().catch(err => {
+      console.warn('⚠️ Email no disponible:', err.message);
+    });
 
-    // PASO 1: Parsear datos (MEJORADO para móvil)
+    // PASO 1: Parsear datos
     let formData;
     try {
       console.log('🔄 Iniciando parseo de datos...');
       
-      // Verificar si hay body
       if (!event.body) {
         console.log('❌ No hay body en la request');
         return {
@@ -684,7 +593,6 @@ exports.handler = async (event, context) => {
         };
       }
 
-      // Parsear según content-type
       const contentType = event.headers['content-type'] || event.headers['Content-Type'] || '';
       console.log('📋 Content-Type detectado:', contentType);
       
@@ -710,25 +618,12 @@ exports.handler = async (event, context) => {
         console.log('📎 Parseando FormData...');
         
         try {
-          formData = await parseFormData(event);
+          // CORRECCIÓN: Usar función simplificada
+          formData = await parseFormDataSimple(event);
           console.log('✅ FormData parseado exitosamente');
-          console.log('📊 Resumen - Campos:', Object.keys(formData.fields).length, 'Archivos:', Object.keys(formData.files).length);
-          
-          // Debug detallado de los datos recibidos
-          console.log('📋 Campos recibidos:', Object.keys(formData.fields));
-          for (const [key, value] of Object.entries(formData.fields)) {
-            console.log(`  - ${key}: ${value ? (value.length > 50 ? `${value.substring(0, 50)}...` : value) : 'VACÍO'}`);
-          }
-          
-          console.log('📁 Archivos recibidos:', Object.keys(formData.files));
-          for (const [key, file] of Object.entries(formData.files)) {
-            console.log(`  - ${key}: ${file ? `${file.size} bytes, ${file.originalFilename}` : 'NO ENCONTRADO'}`);
-          }
-          
         } catch (parseError) {
           console.error('❌ Error específico en parseFormData:', parseError.message);
-          console.error('❌ Stack del error:', parseError.stack);
-          throw parseError; // Re-lanzar para que sea capturado por el catch principal
+          throw parseError;
         }
       } else {
         console.log('❌ Content-type no soportado:', contentType);
@@ -744,12 +639,11 @@ exports.handler = async (event, context) => {
       }
       
       console.log('✅ Datos parseados correctamente');
-      console.log('📊 Campos recibidos:', Object.keys(formData.fields));
-      console.log('📊 Archivos recibidos:', Object.keys(formData.files));
+      console.log('📊 Campos recibidos:', Object.keys(formData.fields).length);
+      console.log('📊 Archivos recibidos:', Object.keys(formData.files).length);
       
     } catch (parseError) {
       console.error('❌ Error parseando datos:', parseError.message);
-      console.error('❌ Stack trace:', parseError.stack);
       
       return {
         statusCode: 400,
@@ -765,19 +659,9 @@ exports.handler = async (event, context) => {
     const { fields, files } = formData;
     const { nombre, dni, correo, telefono, direccion, empresa, talla } = fields;
 
-    console.log('📊 Datos extraídos para validación:');
-    console.log('  - nombre:', nombre ? '✅' : '❌');
-    console.log('  - dni:', dni ? '✅' : '❌');
-    console.log('  - correo:', correo ? '✅' : '❌');
-    console.log('  - telefono:', telefono ? '✅' : '❌');
-    console.log('  - direccion:', direccion ? '✅' : '❌');
-    console.log('  - empresa:', empresa ? '✅' : '❌');
-    console.log('  - talla:', talla ? '✅' : '❌');
-    console.log('📊 Archivos para validación:');
-    console.log('  - dniDelante:', files.dniDelante ? '✅' : '❌');
-    console.log('  - dniDetras:', files.dniDetras ? '✅' : '❌');
+    console.log('📊 Datos extraídos para validación:', { nombre: !!nombre, dni: !!dni, correo: !!correo, empresa: !!empresa });
 
-    // PASO 2: Validaciones (RÁPIDO)
+    // PASO 2: Validaciones
     if (!nombre || !dni || !correo || !telefono || !direccion || !empresa || !talla) {
       console.log('❌ Faltan campos obligatorios');
       const camposFaltantes = [];
@@ -801,7 +685,6 @@ exports.handler = async (event, context) => {
 
     if (!files.dniDelante || !files.dniDetras) {
       console.log('❌ Faltan archivos DNI');
-      console.log('Archivos recibidos:', Object.keys(files));
       return {
         statusCode: 400,
         headers,
@@ -822,7 +705,7 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // PASO 3: Configurar Google (RÁPIDO)
+    // PASO 3: Configurar Google
     const privateKey = processPrivateKey(process.env.GOOGLE_PRIVATE_KEY);
     const auth = new GoogleAuth({
       credentials: {
@@ -847,14 +730,14 @@ exports.handler = async (event, context) => {
     const sheets = google.sheets({ version: 'v4', auth });
     const drive = google.drive({ version: 'v3', auth });
 
-    // PASO 4: Verificar trabajador existente (OPTIMIZADO)
+    // PASO 4: Verificar trabajador existente (con timeout más largo)
     try {
       const existingCheck = await Promise.race([
         sheets.spreadsheets.values.get({
           spreadsheetId: process.env.GOOGLE_SHEET_ID,
           range: 'Trabajadores!B:C'
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000)) // Timeout aumentado
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 8000))
       ]);
 
       const existingRows = existingCheck.data.values || [];
@@ -874,17 +757,16 @@ exports.handler = async (event, context) => {
 
     console.log(`⏱️ Validaciones completadas en ${Date.now() - startTime}ms`);
 
-    // PASO 5: Crear archivos temporales (MEJORADO para móvil)
+    // PASO 5: Crear archivos temporales
     const timestamp = Date.now();
     const dniDelantePath = path.join(os.tmpdir(), `dni_delante_${timestamp}.jpg`);
     const dniDetrasPath = path.join(os.tmpdir(), `dni_detras_${timestamp}.jpg`);
     
     try {
-      // Si los archivos ya tienen path (multiparty los guardó), usar esos
+      // Si los archivos ya tienen path, usar esos
       if (files.dniDelante.path && fs.existsSync(files.dniDelante.path)) {
         tempFilePaths.push(files.dniDelante.path);
       } else if (files.dniDelante.buffer) {
-        // Si tenemos buffer, crear archivo
         fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
         files.dniDelante.path = dniDelantePath;
         tempFilePaths.push(dniDelantePath);
@@ -920,7 +802,7 @@ exports.handler = async (event, context) => {
       headers: files.dniDetras.headers || { 'content-type': 'image/jpeg' }
     };
 
-    // PASO 6: Obtener info carpeta padre (RÁPIDO)
+    // PASO 6: Obtener info carpeta padre
     const parentFolderInfo = await getFileInfo(drive, process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID);
     if (!parentFolderInfo) {
       console.log('❌ No se pudo acceder a la carpeta padre');
@@ -931,7 +813,7 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // PASO 7: Crear carpeta principal (CRÍTICO - DEBE COMPLETARSE)
+    // PASO 7: Crear carpeta principal
     console.log('📁 Creando carpeta principal...');
     const carpetaResponse = await drive.files.create({
       resource: {
@@ -948,11 +830,11 @@ exports.handler = async (event, context) => {
 
     console.log(`⏱️ Carpeta principal creada en ${Date.now() - startTime}ms`);
 
-    // PASO 8: Crear subcarpetas básicas (OPTIMIZADO - en paralelo)
+    // PASO 8: Crear subcarpetas básicas (en paralelo)
     const subcarpetas = ['Nóminas', 'Contratos', 'Formación', 'Certificados', 'Pendiente de Firma'];
     
     const [subcarpetasCreadas, dniUrls] = await Promise.all([
-      // Crear subcarpetas (máximo 5 en paralelo)
+      // Crear subcarpetas
       Promise.all(
         subcarpetas.map(subcarpeta => 
           drive.files.create({
@@ -967,13 +849,13 @@ exports.handler = async (event, context) => {
         )
       ),
       
-      // Subir DNIs (OPTIMIZADO)
+      // Subir DNIs
       uploadDNIImagesOptimized(drive, carpetaId, dniDelanteFile, dniDetrasFile, parentFolderInfo.driveId)
     ]);
 
     console.log(`⏱️ Carpetas y DNIs procesados en ${Date.now() - startTime}ms`);
 
-    // PASO 9: Guardar en Google Sheets (CRÍTICO - DEBE COMPLETARSE)
+    // PASO 9: Guardar en Google Sheets
     const idInterno = `WRK-${timestamp}`;
     const fechaIncorporacion = new Date().toLocaleDateString('es-ES');
     
@@ -995,7 +877,7 @@ exports.handler = async (event, context) => {
           sheetsSaved = true;
           console.log('✅ Datos guardados en Google Sheets');
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 8000)) // Timeout aumentado
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
       ]);
     } catch (error) {
       console.error('❌ Error guardando en Google Sheets:', error.message);
@@ -1015,7 +897,7 @@ exports.handler = async (event, context) => {
     console.log('📧 Enviando email de confirmación...');
     const emailResult = await sendConfirmationEmailSync(correo, nombre, empresa, carpetaUrl);
 
-    // RESPUESTA RÁPIDA AL CLIENTE
+    // RESPUESTA AL CLIENTE
     const totalTime = Date.now() - startTime;
     console.log(`🎉 Registro completado en ${totalTime}ms para: ${nombre}`);
 
@@ -1066,7 +948,6 @@ exports.handler = async (event, context) => {
             dniDelante: !!dniUrls.dniDelanteUrl,
             dniDetras: !!dniUrls.dniDetrasUrl
           },
-          // CORRECCIÓN: Información detallada de permisos y email
           permissions: {
             mainFolder: permissionsResult.principal,
             subfolders: permissionsResult.subcarpetas.length,
