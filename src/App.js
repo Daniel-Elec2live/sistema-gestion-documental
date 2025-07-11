@@ -382,8 +382,10 @@ function App() {
   };
 
   const navigateToFolder = (folder) => {
-    // Solo permitir navegación si la carpeta tiene ID (existe en Drive)
-    if (folder.id) {
+    // Verificar si la carpeta tiene contenido real (documentos o subcarpetas con contenido)
+    const hasContent = isFolderWithContent(folder);
+    
+    if (hasContent) {
       setCurrentFolder(folder);
       setNavigationPath(prev => [...prev, { nombre: folder.nombre, folder: folder }]);
     } else {
@@ -444,6 +446,22 @@ function App() {
     return count;
   };
 
+  // Función para verificar si una carpeta tiene contenido real
+  const isFolderWithContent = (folder) => {
+    // Verificar si tiene documentos directos
+    if (folder.documentos && folder.documentos.length > 0) {
+      return true;
+    }
+    
+    // Verificar si tiene subcarpetas con contenido
+    if (folder.subcarpetas && folder.subcarpetas.length > 0) {
+      return folder.subcarpetas.some(subfolder => isFolderWithContent(subfolder));
+    }
+    
+    // Si no tiene ni documentos ni subcarpetas, o las subcarpetas están vacías
+    return false;
+  };
+
   const renderFolderView = () => {
     if (!currentFolder) {
       return (
@@ -473,16 +491,17 @@ function App() {
             <div className="folders-grid">
               {currentFolder.subcarpetas.map((subfolder, index) => {
                 const totalDocs = countDocumentsRecursively(subfolder);
+                const hasContent = isFolderWithContent(subfolder);
                 
                 return (
                   <div 
                     key={`folder-${index}-${subfolder.nombre}`}
-                    className={`folder-item ${!subfolder.id ? 'folder-empty' : ''}`}
+                    className={`folder-item ${!hasContent ? 'folder-empty' : ''}`}
                     onClick={() => navigateToFolder(subfolder)}
-                    style={{ cursor: subfolder.id ? 'pointer' : 'not-allowed' }}
+                    style={{ cursor: hasContent ? 'pointer' : 'not-allowed' }}
                   >
                     <div className="folder-icon">
-                      {subfolder.id ? '📂' : '📁'}
+                      {hasContent ? '📂' : '📁'}
                     </div>
                     <div className="folder-info">
                       <h4>{subfolder.nombre}</h4>
@@ -492,14 +511,14 @@ function App() {
                           ` • ${subfolder.subcarpetas.length} subcarpeta${subfolder.subcarpetas.length !== 1 ? 's' : ''}`
                         }
                       </p>
-                      {!subfolder.id && (
+                      {!hasContent && (
                         <p style={{ color: '#888', fontSize: '12px', fontStyle: 'italic' }}>
                           Carpeta vacía
                         </p>
                       )}
                     </div>
                     <div className="folder-arrow">
-                      {subfolder.id ? '→' : '∅'}
+                      {hasContent ? '→' : '∅'}
                     </div>
                   </div>
                 );
