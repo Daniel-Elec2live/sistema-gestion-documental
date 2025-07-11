@@ -37,34 +37,52 @@ async function getFileInfo(drive, fileId) {
   }
 }
 
-// Configurar Nodemailer
-let transporter;
-try {
-  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    transporter = nodemailer.createTransporter({
-      host: process.env.SMTP_HOST,
-      port: parseInt(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === 'true',
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      },
-      tls: {
-        rejectUnauthorized: false
-      }
-    });
-    
-    // Verificar conexión SMTP al inicio
-    transporter.verify().then(() => {
+// CORRECCIÓN PROBLEMA 1: Configurar Nodemailer con mejor manejo de errores
+let transporter = null;
+let transporterReady = false;
+
+async function initializeTransporter() {
+  try {
+    if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+      transporter = nodemailer.createTransporter({
+        host: process.env.SMTP_HOST,
+        port: parseInt(process.env.SMTP_PORT) || 587,
+        secure: process.env.SMTP_SECURE === 'true',
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS
+        },
+        tls: {
+          rejectUnauthorized: false
+        },
+        connectionTimeout: 60000, // 60 segundos
+        socketTimeout: 60000,
+        pool: true,
+        maxConnections: 5,
+        maxMessages: 100
+      });
+      
+      // CORRECCIÓN: Verificar conexión con timeout más largo
+      await Promise.race([
+        transporter.verify(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('SMTP verification timeout')), 10000)
+        )
+      ]);
+      
+      transporterReady = true;
       console.log('✅ Servidor SMTP listo para enviar emails');
-    }).catch(err => {
-      console.error('❌ Error verificando SMTP:', err.message);
-      transporter = null;
-    });
+      return true;
+    } else {
+      console.warn('⚠️ Variables SMTP no configuradas');
+      return false;
+    }
+  } catch (error) {
+    console.error('❌ Error configurando SMTP:', error.message);
+    transporter = null;
+    transporterReady = false;
+    return false;
   }
-} catch (error) {
-  console.error('Error configurando Nodemailer:', error);
-  transporter = null;
 }
 
 // Función SUPER OPTIMIZADA para subir DNIs Y crear carpeta
@@ -143,10 +161,10 @@ async function uploadDNIImagesOptimized(drive, carpetaId, dniDelanteFile, dniDet
       );
     }
 
-    // Esperar subidas con timeout corto
+    // CORRECCIÓN PROBLEMA 3: Timeout más largo para móviles
     await Promise.race([
       Promise.all(uploadPromises),
-      new Promise(resolve => setTimeout(resolve, 15000)) // 15 segundos máximo
+      new Promise(resolve => setTimeout(resolve, 30000)) // 30 segundos para móviles
     ]);
 
     console.log('✅ Proceso de DNIs completado');
@@ -159,135 +177,141 @@ async function uploadDNIImagesOptimized(drive, carpetaId, dniDelanteFile, dniDet
   return uploadedFiles;
 }
 
-// Función OPTIMIZADA para enviar email (sin bloquear)
-function sendConfirmationEmailAsync(correo, nombre, empresa, carpetaUrl = null) {
-  // Enviar email en background SIN esperar
-  if (transporter) {
-    setImmediate(async () => {
-      try {
-        const fechaRegistro = new Date().toLocaleDateString('es-ES', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        });
+// CORRECCIÓN PROBLEMA 1: Función mejorada para enviar email de forma síncrona
+async function sendConfirmationEmailSync(correo, nombre, empresa, carpetaUrl = null) {
+  if (!transporter || !transporterReady) {
+    console.warn('⚠️ Transporter no está listo, inicializando...');
+    const initialized = await initializeTransporter();
+    if (!initialized) {
+      console.error('❌ No se pudo inicializar el transporter');
+      return { success: false, error: 'SMTP no configurado' };
+    }
+  }
 
-        const mailOptions = {
-          from: {
-            name: process.env.FROM_NAME || 'Sistema de Gestión Documental',
-            address: process.env.FROM_EMAIL || process.env.SMTP_USER
-          },
-          to: correo,
-          subject: '🎉 Bienvenido al Sistema de Gestión Documental - Acceso Configurado',
-          html: `
-            <!DOCTYPE html>
-            <html lang="es">
-            <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>Bienvenido al Sistema</title>
-            </head>
-            <body style="margin: 0; padding: 20px; font-family: 'Arial', sans-serif; background-color: #f4f4f4;">
-              <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-                
-                <!-- Header -->
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
-                  <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 300;">¡Bienvenido al Sistema!</h1>
-                  <p style="color: #e8f0fe; margin: 10px 0 0 0; font-size: 16px;">Tu registro se ha completado exitosamente</p>
-                </div>
-                
-                <!-- Content -->
-                <div style="padding: 40px 30px;">
-                  <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-                    Hola <strong style="color: #667eea;">${nombre}</strong>,
-                  </p>
-                  
-                  <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
-                    Te confirmamos que tu registro en el Sistema de Gestión Documental se ha completado exitosamente y ya tienes acceso a tu carpeta personal de documentos.
-                  </p>
+  try {
+    const fechaRegistro = new Date().toLocaleDateString('es-ES', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
 
-                  ${carpetaUrl ? `
-                  <!-- Acceso a Carpeta Personal -->
-                  <div style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
-                    <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📁 Tu Carpeta Personal</h3>
-                    <p style="color: white; margin: 0 0 15px 0;">Ya puedes acceder a tu carpeta personal de documentos:</p>
-                    <div style="text-align: center;">
-                      <a href="${carpetaUrl}" 
-                         style="display: inline-block; background: rgba(255,255,255,0.2); color: white; padding: 12px 30px; text-decoration: none; border-radius: 25px; font-weight: bold; border: 2px solid white;">
-                        🔗 Acceder a Mi Carpeta
-                      </a>
-                    </div>
-                  </div>
-                  ` : ''}
-                  
-                  <!-- Info Box -->
-                  <div style="background: linear-gradient(135deg,rgb(200, 227, 248) 0%, #7bbbea 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
-                    <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📋 Datos de tu registro</h3>
-                    <table style="width: 100%; color: white;">
-                      <tr>
-                        <td style="padding: 5px 0; font-weight: bold;">Nombre:</td>
-                        <td style="padding: 5px 0;">${nombre}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 5px 0; font-weight: bold;">Empresa:</td>
-                        <td style="padding: 5px 0;">${empresa}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 5px 0; font-weight: bold;">Email:</td>
-                        <td style="padding: 5px 0;">${correo}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 5px 0; font-weight: bold;">Fecha:</td>
-                        <td style="padding: 5px 0;">${fechaRegistro}</td>
-                      </tr>
-                    </table>
-                  </div>
-                  
-                  <!-- Features -->
-                  <div style="margin: 30px 0;">
-                    <h3 style="color: #333; margin-bottom: 20px; font-size: 18px;">🚀 ¿Qué puedes hacer ahora?</h3>
-                    <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
-                      <ul style="margin: 0; padding-left: 20px; color: #666;">
-                        <li style="margin-bottom: 10px; line-height: 1.6;">✅ Acceder a tu carpeta personal desde Google Drive</li>
-                        <li style="margin-bottom: 10px; line-height: 1.6;">✅ Ver y descargar tus documentos personales</li>
-                        <li style="margin-bottom: 10px; line-height: 1.6;">✅ Consultar nóminas, contratos y certificados</li>
-                        <li style="margin-bottom: 10px; line-height: 1.6;">✅ Recibir notificaciones de nuevos archivos</li>
-                        <li style="margin-bottom: 0; line-height: 1.6;">✅ Gestionar y revisar tus documentos laborales</li>
-                      </ul>
-                    </div>
-                  </div>
-                  
-                  <!-- Important Note -->
-                  <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 30px 0;">
-                    <h4 style="color: #856404; margin: 0 0 10px 0; font-size: 16px;">📧 Importante</h4>
-                    <p style="color: #856404; margin: 0; font-size: 14px; line-height: 1.5;">
-                      Es posible que hayas recibido una notificación de Google Drive sobre el acceso a tu carpeta. 
-                      Esto es normal y confirma que ya puedes acceder a tus documentos.
-                    </p>
-                  </div>
-                  
-                  <!-- CTA Button -->
-                  <div style="text-align: center; margin: 40px 0;">
-                    <a href="${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}" 
-                       style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s;">
-                      🔗 Acceder al Sistema
-                    </a>
-                  </div>
-                </div>
-                
-                <!-- Footer -->
-                <div style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #dee2e6;">
-                  <p style="color: #6c757d; font-size: 12px; margin: 0 0 10px 0;">
-                    Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
-                  </p>
-                  <p style="color: #868e96; font-size: 11px; margin: 0;">
-                    Por favor, no respondas a este mensaje. © ${new Date().getFullYear()} Sistema de Gestión Documental.
-                  </p>
+    const mailOptions = {
+      from: {
+        name: process.env.FROM_NAME || 'Sistema de Gestión Documental',
+        address: process.env.FROM_EMAIL || process.env.SMTP_USER
+      },
+      to: correo,
+      subject: '🎉 Bienvenido al Sistema de Gestión Documental - Acceso Configurado',
+      html: `
+        <!DOCTYPE html>
+        <html lang="es">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Bienvenido al Sistema</title>
+        </head>
+        <body style="margin: 0; padding: 20px; font-family: 'Arial', sans-serif; background-color: #f4f4f4;">
+          <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            
+            <!-- Header -->
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 300;">¡Bienvenido al Sistema!</h1>
+              <p style="color: #e8f0fe; margin: 10px 0 0 0; font-size: 16px;">Tu registro se ha completado exitosamente</p>
+            </div>
+            
+            <!-- Content -->
+            <div style="padding: 40px 30px;">
+              <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                Hola <strong style="color: #667eea;">${nombre}</strong>,
+              </p>
+              
+              <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+                Te confirmamos que tu registro en el Sistema de Gestión Documental se ha completado exitosamente y ya tienes acceso a tu carpeta personal de documentos.
+              </p>
+
+              ${carpetaUrl ? `
+              <!-- Acceso a Carpeta Personal -->
+              <div style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
+                <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📁 Tu Carpeta Personal</h3>
+                <p style="color: white; margin: 0 0 15px 0;">Ya puedes acceder a tu carpeta personal de documentos:</p>
+                <div style="text-align: center;">
+                  <a href="${carpetaUrl}" 
+                     style="display: inline-block; background: rgba(255,255,255,0.2); color: white; padding: 12px 30px; text-decoration: none; border-radius: 25px; font-weight: bold; border: 2px solid white;">
+                    🔗 Acceder a Mi Carpeta
+                  </a>
                 </div>
               </div>
-            </body>
-            </html>
-          `,
-          text: `
+              ` : ''}
+              
+              <!-- Info Box -->
+              <div style="background: linear-gradient(135deg,rgb(200, 227, 248) 0%, #7bbbea 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
+                <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📋 Datos de tu registro</h3>
+                <table style="width: 100%; color: white;">
+                  <tr>
+                    <td style="padding: 5px 0; font-weight: bold;">Nombre:</td>
+                    <td style="padding: 5px 0;">${nombre}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 5px 0; font-weight: bold;">Empresa:</td>
+                    <td style="padding: 5px 0;">${empresa}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 5px 0; font-weight: bold;">Email:</td>
+                    <td style="padding: 5px 0;">${correo}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 5px 0; font-weight: bold;">Fecha:</td>
+                    <td style="padding: 5px 0;">${fechaRegistro}</td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- Features -->
+              <div style="margin: 30px 0;">
+                <h3 style="color: #333; margin-bottom: 20px; font-size: 18px;">🚀 ¿Qué puedes hacer ahora?</h3>
+                <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
+                  <ul style="margin: 0; padding-left: 20px; color: #666;">
+                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Acceder a tu carpeta personal desde Google Drive</li>
+                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Ver y descargar tus documentos personales</li>
+                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Consultar nóminas, contratos y certificados</li>
+                    <li style="margin-bottom: 10px; line-height: 1.6;">✅ Recibir notificaciones de nuevos archivos</li>
+                    <li style="margin-bottom: 0; line-height: 1.6;">✅ Gestionar y revisar tus documentos laborales</li>
+                  </ul>
+                </div>
+              </div>
+              
+              <!-- Important Note -->
+              <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 30px 0;">
+                <h4 style="color: #856404; margin: 0 0 10px 0; font-size: 16px;">📧 Importante</h4>
+                <p style="color: #856404; margin: 0; font-size: 14px; line-height: 1.5;">
+                  Es posible que hayas recibido una notificación de Google Drive sobre el acceso a tu carpeta. 
+                  Esto es normal y confirma que ya puedes acceder a tus documentos.
+                </p>
+              </div>
+              
+              <!-- CTA Button -->
+              <div style="text-align: center; margin: 40px 0;">
+                <a href="${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}" 
+                   style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s;">
+                  🔗 Acceder al Sistema
+                </a>
+              </div>
+            </div>
+            
+            <!-- Footer -->
+            <div style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #dee2e6;">
+              <p style="color: #6c757d; font-size: 12px; margin: 0 0 10px 0;">
+                Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
+              </p>
+              <p style="color: #868e96; font-size: 11px; margin: 0;">
+                Por favor, no respondas a este mensaje. © ${new Date().getFullYear()} Sistema de Gestión Documental.
+              </p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `,
+      text: `
 ¡Bienvenido al Sistema de Gestión Documental!
 
 Hola ${nombre},
@@ -318,81 +342,139 @@ ${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}
 IMPORTANTE: Es posible que hayas recibido una notificación de Google Drive sobre el acceso a tu carpeta. Esto es normal y confirma que ya puedes acceder a tus documentos.
 
 © ${new Date().getFullYear()} Sistema de Gestión Documental.
-          `
-        };
+      `
+    };
 
-        await transporter.sendMail(mailOptions);
-        console.log('✅ Email enviado exitosamente a:', correo);
-      } catch (error) {
-        console.error('❌ Error enviando email:', error.message);
-      }
-    });
-  } else {
-    console.warn('⚠️ No se puede enviar email - Transporter no configurado');
+    // CORRECCIÓN: Enviar email con timeout apropiado
+    const result = await Promise.race([
+      transporter.sendMail(mailOptions),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Email timeout')), 30000)
+      )
+    ]);
+
+    console.log('✅ Email enviado exitosamente a:', correo);
+    return { success: true, messageId: result.messageId };
+
+  } catch (error) {
+    console.error('❌ Error enviando email:', error.message);
+    return { success: false, error: error.message };
   }
-  return { success: true, messageId: 'background' };
 }
 
-// Función OPTIMIZADA para permisos (sin bloquear proceso principal)
-function grantPermissionsAsync(drive, carpetaId, subcarpetasIds, correo, documentosPersonalesId) {
-  // Procesar permisos en background
-  setImmediate(async () => {
-    try {
-      console.log('🔐 Configurando permisos en background...');
-      
-      const permissionPromises = [];
-      
-      // Permiso carpeta principal
-      permissionPromises.push(
-        drive.permissions.create({
-          fileId: carpetaId,
-          resource: { role: 'reader', type: 'user', emailAddress: correo },
-          supportsAllDrives: true,
-          sendNotificationEmail: false // Sin notificación para acelerar
-        }).catch(err => console.error('Error permiso principal:', err.message))
-      );
+// CORRECCIÓN PROBLEMA 2: Función mejorada para permisos con reintentos
+async function grantPermissionsSync(drive, carpetaId, subcarpetasIds, correo, documentosPersonalesId) {
+  console.log('🔐 Configurando permisos...');
+  
+  const results = {
+    principal: false,
+    subcarpetas: [],
+    documentosPersonales: false,
+    errors: []
+  };
 
-      // Permisos subcarpetas
-      subcarpetasIds.forEach(subcarpeta => {
+  try {
+    // CORRECCIÓN: Permisos con reintentos y timeouts más largos
+    const maxRetries = 3;
+    const retryDelay = 2000;
+
+    // Función helper para reintentos
+    const retryOperation = async (operation, description, retries = maxRetries) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          await Promise.race([
+            operation(),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Timeout')), 15000) // 15 segundos
+            )
+          ]);
+          console.log(`✅ ${description} - intento ${i + 1}`);
+          return true;
+        } catch (error) {
+          console.warn(`⚠️ ${description} falló - intento ${i + 1}:`, error.message);
+          if (i < retries - 1) {
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+          } else {
+            results.errors.push(`${description}: ${error.message}`);
+          }
+        }
+      }
+      return false;
+    };
+
+    // Permiso carpeta principal
+    results.principal = await retryOperation(
+      () => drive.permissions.create({
+        fileId: carpetaId,
+        resource: { 
+          role: 'reader', 
+          type: 'user', 
+          emailAddress: correo 
+        },
+        supportsAllDrives: true,
+        sendNotificationEmail: false
+      }),
+      'Permiso carpeta principal'
+    );
+
+    // Permisos subcarpetas en lotes pequeños para evitar rate limits
+    const batchSize = 2;
+    for (let i = 0; i < subcarpetasIds.length; i += batchSize) {
+      const batch = subcarpetasIds.slice(i, i + batchSize);
+      
+      await Promise.all(batch.map(async (subcarpeta) => {
         if (subcarpeta.id) {
-          permissionPromises.push(
-            drive.permissions.create({
+          const success = await retryOperation(
+            () => drive.permissions.create({
               fileId: subcarpeta.id,
-              resource: { role: 'reader', type: 'user', emailAddress: correo },
+              resource: { 
+                role: 'reader', 
+                type: 'user', 
+                emailAddress: correo 
+              },
               supportsAllDrives: true,
               sendNotificationEmail: false
-            }).catch(err => console.error(`Error permiso ${subcarpeta.nombre}:`, err.message))
+            }),
+            `Permiso ${subcarpeta.nombre}`
           );
+          results.subcarpetas.push({ nombre: subcarpeta.nombre, success });
         }
-      });
+      }));
 
-      // Permiso para Documentos Personales
-      if (documentosPersonalesId) {
-        permissionPromises.push(
-          drive.permissions.create({
-            fileId: documentosPersonalesId,
-            resource: { role: 'reader', type: 'user', emailAddress: correo },
-            supportsAllDrives: true,
-            sendNotificationEmail: true // Solo esta notificación
-          }).catch(err => console.error('Error permiso Documentos Personales:', err.message))
-        );
+      // Pausa entre lotes
+      if (i + batchSize < subcarpetasIds.length) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
-
-      // Ejecutar con timeout
-      await Promise.race([
-        Promise.allSettled(permissionPromises),
-        new Promise(resolve => setTimeout(resolve, 10000)) // 10 segundos máximo
-      ]);
-
-      console.log('✅ Permisos configurados en background');
-      
-    } catch (error) {
-      console.error('❌ Error configurando permisos:', error.message);
     }
-  });
+
+    // Permiso para Documentos Personales (con notificación)
+    if (documentosPersonalesId) {
+      results.documentosPersonales = await retryOperation(
+        () => drive.permissions.create({
+          fileId: documentosPersonalesId,
+          resource: { 
+            role: 'reader', 
+            type: 'user', 
+            emailAddress: correo 
+          },
+          supportsAllDrives: true,
+          sendNotificationEmail: true // Solo esta notificación
+        }),
+        'Permiso Documentos Personales'
+      );
+    }
+
+    console.log('✅ Configuración de permisos completada');
+    
+  } catch (error) {
+    console.error('❌ Error configurando permisos:', error.message);
+    results.errors.push(`Error general: ${error.message}`);
+  }
+
+  return results;
 }
 
-// Función MEJORADA para parsear FormData (compatible con móvil)
+// CORRECCIÓN PROBLEMA 3: Función mejorada para parsear FormData (optimizada para móviles)
 function parseFormData(event) {
   return new Promise((resolve, reject) => {
     try {
@@ -408,16 +490,21 @@ function parseFormData(event) {
         return;
       }
       
+      // CORRECCIÓN PROBLEMA 3: Configuración optimizada para móviles
       const form = new multiparty.Form({
-        maxFilesSize: 50 * 1024 * 1024, // 50MB máximo
-        maxFields: 20,
-        maxFieldsSize: 10 * 1024 * 1024, // 10MB para campos
+        maxFilesSize: 100 * 1024 * 1024, // 100MB máximo (aumentado para móviles)
+        maxFields: 50, // Más campos permitidos
+        maxFieldsSize: 20 * 1024 * 1024, // 20MB para campos
         autoFields: true,
         autoFiles: true,
-        uploadDir: os.tmpdir() // Usar directorio temporal del sistema
+        uploadDir: os.tmpdir(),
+        // CORRECCIÓN: Opciones adicionales para móviles
+        encoding: 'utf8',
+        hash: false, // Deshabilitar hash para mayor velocidad
+        multiples: false
       });
       
-      // Crear buffer del body
+      // Crear buffer del body con mejor manejo de errores
       let bodyBuffer;
       try {
         if (event.isBase64Encoded) {
@@ -434,20 +521,32 @@ function parseFormData(event) {
 
       const { Readable } = require('stream');
       const bodyStream = new Readable({
-        read() {}
+        read() {},
+        // CORRECCIÓN PROBLEMA 3: Configuración optimizada para el stream
+        highWaterMark: 64 * 1024, // 64KB chunks para mejor rendimiento en móviles
+        objectMode: false
       });
       
       // Push buffer al stream
       bodyStream.push(bodyBuffer);
       bodyStream.push(null);
       
-      // Headers críticos para móvil - FIX PRINCIPAL
+      // CORRECCIÓN PROBLEMA 3: Headers críticos para móvil mejorados
       bodyStream.headers = {
         'content-type': contentType,
-        'content-length': bodyBuffer.length.toString()
+        'content-length': bodyBuffer.length.toString(),
+        // Agregar headers adicionales para compatibilidad móvil
+        'transfer-encoding': 'chunked'
       };
 
+      // CORRECCIÓN PROBLEMA 3: Timeout más largo para móviles
+      const parseTimeout = setTimeout(() => {
+        reject(new Error('Timeout parseando FormData (móvil)'));
+      }, 60000); // 60 segundos para móviles
+
       form.parse(bodyStream, (err, fields, files) => {
+        clearTimeout(parseTimeout);
+        
         if (err) {
           console.error('❌ Error parseando FormData:', err);
           reject(err);
@@ -464,17 +563,18 @@ function parseFormData(event) {
           cleanFields[key] = Array.isArray(value) ? value[0] : value;
         }
 
-        // Procesar archivos
+        // Procesar archivos con validación mejorada
         const cleanFiles = {};
         for (const [key, fileArray] of Object.entries(files)) {
           const file = Array.isArray(fileArray) ? fileArray[0] : fileArray;
-          if (file && file.path) {
+          if (file && file.path && fs.existsSync(file.path)) {
             cleanFiles[key] = {
               path: file.path,
-              originalFilename: file.originalFilename,
+              originalFilename: file.originalFilename || `${key}.jpg`,
               headers: file.headers || { 'content-type': 'application/octet-stream' },
-              size: file.size
+              size: file.size || 0
             };
+            console.log(`📁 Archivo ${key} procesado: ${file.size} bytes`);
           }
         }
 
@@ -489,15 +589,16 @@ function parseFormData(event) {
 }
 
 exports.handler = async (event, context) => {
-  // AUMENTAR TIMEOUT
+  // CORRECCIÓN PROBLEMA 3: Timeout más largo para móviles
   context.callbackWaitsForEmptyEventLoop = false;
   
   // CORS headers mejorados para móvil
   const headers = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, Content-Length',
+    'Access-Control-Allow-Headers': 'Content-Type, Content-Length, Authorization',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Max-Age': '86400'
+    'Access-Control-Max-Age': '86400',
+    'Content-Type': 'application/json'
   };
 
   // Log inicial para debug
@@ -524,6 +625,10 @@ exports.handler = async (event, context) => {
   const startTime = Date.now();
 
   try {
+    // CORRECCIÓN PROBLEMA 1: Inicializar transporter al inicio
+    console.log('📧 Inicializando sistema de email...');
+    await initializeTransporter();
+
     // PASO 1: Parsear datos (MEJORADO para móvil)
     let formData;
     try {
@@ -678,7 +783,7 @@ exports.handler = async (event, context) => {
           spreadsheetId: process.env.GOOGLE_SHEET_ID,
           range: 'Trabajadores!B:C'
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000)) // Timeout aumentado
       ]);
 
       const existingRows = existingCheck.data.values || [];
@@ -819,15 +924,25 @@ exports.handler = async (event, context) => {
           sheetsSaved = true;
           console.log('✅ Datos guardados en Google Sheets');
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 8000)) // Timeout aumentado
       ]);
     } catch (error) {
       console.error('❌ Error guardando en Google Sheets:', error.message);
     }
 
-    // PASO 10: Procesos en background (NO BLOQUEAN la respuesta)
-    sendConfirmationEmailAsync(correo, nombre, empresa, carpetaUrl);
-    grantPermissionsAsync(drive, carpetaId, subcarpetasCreadas, correo, dniUrls.documentosPersonalesFolderId);
+    // CORRECCIÓN PROBLEMA 2: Configurar permisos de forma síncrona
+    console.log('🔐 Configurando permisos...');
+    const permissionsResult = await grantPermissionsSync(
+      drive, 
+      carpetaId, 
+      subcarpetasCreadas, 
+      correo, 
+      dniUrls.documentosPersonalesFolderId
+    );
+
+    // CORRECCIÓN PROBLEMA 1: Enviar email de forma síncrona
+    console.log('📧 Enviando email de confirmación...');
+    const emailResult = await sendConfirmationEmailSync(correo, nombre, empresa, carpetaUrl);
 
     // RESPUESTA RÁPIDA AL CLIENTE
     const totalTime = Date.now() - startTime;
@@ -852,12 +967,14 @@ exports.handler = async (event, context) => {
         carpetaUrl,
         processingTime: totalTime,
         workerAccess: {
-          granted: true,
+          granted: permissionsResult.principal,
           accessLevel: 'reader',
-          status: 'processing_background'
+          status: 'completed',
+          details: permissionsResult
         },
-        emailSent: !!transporter,
-        emailStatus: transporter ? 'processing_background' : 'smtp_not_configured',
+        emailSent: emailResult.success,
+        emailStatus: emailResult.success ? 'sent' : 'failed',
+        emailError: emailResult.error || null,
         dniUploaded: {
           delante: !!dniUrls.dniDelanteUrl,
           detras: !!dniUrls.dniDetrasUrl,
@@ -877,6 +994,18 @@ exports.handler = async (event, context) => {
             total: (dniUrls.dniDelanteUrl ? 1 : 0) + (dniUrls.dniDetrasUrl ? 1 : 0),
             dniDelante: !!dniUrls.dniDelanteUrl,
             dniDetras: !!dniUrls.dniDetrasUrl
+          },
+          // CORRECCIÓN: Información detallada de permisos y email
+          permissions: {
+            mainFolder: permissionsResult.principal,
+            subfolders: permissionsResult.subcarpetas.length,
+            documentsFolder: permissionsResult.documentosPersonales,
+            errors: permissionsResult.errors
+          },
+          email: {
+            sent: emailResult.success,
+            messageId: emailResult.messageId || null,
+            error: emailResult.error || null
           }
         }
       })
@@ -892,7 +1021,8 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({ 
         error: 'Error interno del servidor',
         details: process.env.NODE_ENV === 'development' ? error.message : 'Error procesando solicitud',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        processingTime: Date.now() - startTime
       })
     };
   } finally {
