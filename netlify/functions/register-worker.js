@@ -53,9 +53,18 @@ try {
         rejectUnauthorized: false
       }
     });
+    
+    // Verificar conexión SMTP al inicio
+    transporter.verify().then(() => {
+      console.log('✅ Servidor SMTP listo para enviar emails');
+    }).catch(err => {
+      console.error('❌ Error verificando SMTP:', err.message);
+      transporter = null;
+    });
   }
 } catch (error) {
   console.error('Error configurando Nodemailer:', error);
+  transporter = null;
 }
 
 // Función SUPER OPTIMIZADA para subir DNIs Y crear carpeta
@@ -318,6 +327,8 @@ IMPORTANTE: Es posible que hayas recibido una notificación de Google Drive sobr
         console.error('❌ Error enviando email:', error.message);
       }
     });
+  } else {
+    console.warn('⚠️ No se puede enviar email - Transporter no configurado');
   }
   return { success: true, messageId: 'background' };
 }
@@ -402,9 +413,11 @@ function parseFormData(event) {
         maxFields: 20,
         maxFieldsSize: 10 * 1024 * 1024, // 10MB para campos
         autoFields: true,
-        autoFiles: true
+        autoFiles: true,
+        uploadDir: os.tmpdir() // Usar directorio temporal del sistema
       });
       
+      // Crear buffer del body
       let bodyBuffer;
       try {
         if (event.isBase64Encoded) {
@@ -420,114 +433,53 @@ function parseFormData(event) {
       }
 
       const { Readable } = require('stream');
-      const bodyStream = new Readable();
+      const bodyStream = new Readable({
+        read() {}
+      });
+      
+      // Push buffer al stream
       bodyStream.push(bodyBuffer);
       bodyStream.push(null);
       
-      // Headers críticos para móvil
+      // Headers críticos para móvil - FIX PRINCIPAL
       bodyStream.headers = {
         'content-type': contentType,
-        'content-length': bodyBuffer.length.toString(),
-        ...event.headers
-      };
-      bodyStream.method = 'POST';
-
-      const fields = {};
-      const files = {};
-      let errorOccurred = false;
-
-      form.on('field', (name, value) => {
-        if (!errorOccurred) {
-          fields[name] = value;
-          console.log(`📝 Campo recibido: ${name} = ${typeof value === 'string' ? value.substring(0, 50) : value}...`);
-        }
-      });
-
-      form.on('part', (part) => {
-        if (errorOccurred) return;
-        
-        console.log(`📎 Parte recibida: ${part.name}, filename: ${part.filename}`);
-        
-        if (part.filename) {
-          const chunks = [];
-          
-          part.on('data', (chunk) => {
-            if (!errorOccurred) {
-              chunks.push(chunk);
-            }
-          });
-          
-          part.on('end', () => {
-            if (!errorOccurred) {
-              const buffer = Buffer.concat(chunks);
-              files[part.name] = {
-                originalFilename: part.filename,
-                headers: part.headers || { 'content-type': 'application/octet-stream' },
-                buffer: buffer
-              };
-              console.log(`✅ Archivo procesado: ${part.name}, tamaño: ${buffer.length}`);
-            }
-          });
-          
-          part.on('error', (error) => {
-            if (!errorOccurred) {
-              console.error(`❌ Error en parte ${part.name}:`, error);
-              errorOccurred = true;
-              reject(error);
-            }
-          });
-        }
-      });
-
-      form.on('error', (error) => {
-        if (!errorOccurred) {
-          console.error('❌ Error en multiparty:', error);
-          errorOccurred = true;
-          reject(error);
-        }
-      });
-      
-      form.on('close', () => {
-        if (!errorOccurred) {
-          console.log('✅ FormData parseado correctamente');
-          console.log('📊 Campos:', Object.keys(fields));
-          console.log('📊 Archivos:', Object.keys(files));
-          resolve({ fields, files });
-        }
-      });
-
-      // Timeout de seguridad más largo para móvil
-      const timeoutMs = 45000; // 45 segundos
-      const timeoutId = setTimeout(() => {
-        if (!errorOccurred) {
-          errorOccurred = true;
-          reject(new Error(`Timeout parseando FormData después de ${timeoutMs/1000}s`));
-        }
-      }, timeoutMs);
-
-      // Limpiar timeout al resolver
-      const originalResolve = resolve;
-      const originalReject = reject;
-      
-      resolve = (value) => {
-        clearTimeout(timeoutId);
-        originalResolve(value);
-      };
-      
-      reject = (error) => {
-        clearTimeout(timeoutId);
-        originalReject(error);
+        'content-length': bodyBuffer.length.toString()
       };
 
-      try {
-        form.parse(bodyStream);
-      } catch (parseError) {
-        console.error('❌ Error iniciando parseo:', parseError);
-        if (!errorOccurred) {
-          errorOccurred = true;
-          reject(parseError);
+      form.parse(bodyStream, (err, fields, files) => {
+        if (err) {
+          console.error('❌ Error parseando FormData:', err);
+          reject(err);
+          return;
         }
-      }
+
+        console.log('✅ FormData parseado correctamente');
+        console.log('📊 Campos:', Object.keys(fields));
+        console.log('📊 Archivos:', Object.keys(files));
+
+        // Convertir arrays de campos a valores simples
+        const cleanFields = {};
+        for (const [key, value] of Object.entries(fields)) {
+          cleanFields[key] = Array.isArray(value) ? value[0] : value;
+        }
+
+        // Procesar archivos
+        const cleanFiles = {};
+        for (const [key, fileArray] of Object.entries(files)) {
+          const file = Array.isArray(fileArray) ? fileArray[0] : fileArray;
+          if (file && file.path) {
+            cleanFiles[key] = {
+              path: file.path,
+              originalFilename: file.originalFilename,
+              headers: file.headers || { 'content-type': 'application/octet-stream' },
+              size: file.size
+            };
+          }
+        }
+
+        resolve({ fields: cleanFields, files: cleanFiles });
+      });
       
     } catch (error) {
       console.error('❌ Error crítico en parseFormData:', error);
@@ -626,6 +578,8 @@ exports.handler = async (event, context) => {
       }
       
       console.log('✅ Datos parseados correctamente');
+      console.log('📊 Campos recibidos:', Object.keys(formData.fields));
+      console.log('📊 Archivos recibidos:', Object.keys(formData.files));
       
     } catch (parseError) {
       console.error('❌ Error parseando datos:', parseError.message);
@@ -635,7 +589,7 @@ exports.handler = async (event, context) => {
         statusCode: 400,
         headers,
         body: JSON.stringify({ 
-          error: 'Error procesando formulario',
+          error: 'Error procesando formulario. Por favor, intenta de nuevo.',
           details: parseError.message,
           type: 'PARSE_ERROR'
         })
@@ -650,19 +604,35 @@ exports.handler = async (event, context) => {
     // PASO 2: Validaciones (RÁPIDO)
     if (!nombre || !dni || !correo || !telefono || !direccion || !empresa || !talla) {
       console.log('❌ Faltan campos obligatorios');
+      const camposFaltantes = [];
+      if (!nombre) camposFaltantes.push('nombre');
+      if (!dni) camposFaltantes.push('dni');
+      if (!correo) camposFaltantes.push('correo');
+      if (!telefono) camposFaltantes.push('telefono');
+      if (!direccion) camposFaltantes.push('direccion');
+      if (!empresa) camposFaltantes.push('empresa');
+      if (!talla) camposFaltantes.push('talla');
+      
       return {
         statusCode: 400,
         headers,
-        body: JSON.stringify({ error: 'Todos los campos son obligatorios' })
+        body: JSON.stringify({ 
+          error: 'Todos los campos son obligatorios',
+          camposFaltantes 
+        })
       };
     }
 
     if (!files.dniDelante || !files.dniDetras) {
       console.log('❌ Faltan archivos DNI');
+      console.log('Archivos recibidos:', Object.keys(files));
       return {
         statusCode: 400,
         headers,
-        body: JSON.stringify({ error: 'Debes subir ambas fotos del DNI' })
+        body: JSON.stringify({ 
+          error: 'Debes subir ambas fotos del DNI',
+          archivosRecibidos: Object.keys(files)
+        })
       };
     }
 
@@ -734,10 +704,25 @@ exports.handler = async (event, context) => {
     const dniDetrasPath = path.join(os.tmpdir(), `dni_detras_${timestamp}.jpg`);
     
     try {
-      fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
-      fs.writeFileSync(dniDetrasPath, files.dniDetras.buffer);
-      tempFilePaths = [dniDelantePath, dniDetrasPath];
-      console.log('✅ Archivos temporales creados');
+      // Si los archivos ya tienen path (multiparty los guardó), usar esos
+      if (files.dniDelante.path && fs.existsSync(files.dniDelante.path)) {
+        tempFilePaths.push(files.dniDelante.path);
+      } else if (files.dniDelante.buffer) {
+        // Si tenemos buffer, crear archivo
+        fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
+        files.dniDelante.path = dniDelantePath;
+        tempFilePaths.push(dniDelantePath);
+      }
+
+      if (files.dniDetras.path && fs.existsSync(files.dniDetras.path)) {
+        tempFilePaths.push(files.dniDetras.path);
+      } else if (files.dniDetras.buffer) {
+        fs.writeFileSync(dniDetrasPath, files.dniDetras.buffer);
+        files.dniDetras.path = dniDetrasPath;
+        tempFilePaths.push(dniDetrasPath);
+      }
+
+      console.log('✅ Archivos temporales preparados');
     } catch (fileError) {
       console.error('❌ Error creando archivos temporales:', fileError.message);
       return {
@@ -748,13 +733,13 @@ exports.handler = async (event, context) => {
     }
 
     const dniDelanteFile = {
-      path: dniDelantePath,
+      path: files.dniDelante.path,
       originalFilename: files.dniDelante.originalFilename,
       headers: files.dniDelante.headers || { 'content-type': 'image/jpeg' }
     };
 
     const dniDetrasFile = {
-      path: dniDetrasPath,
+      path: files.dniDetras.path,
       originalFilename: files.dniDetras.originalFilename,
       headers: files.dniDetras.headers || { 'content-type': 'image/jpeg' }
     };
@@ -871,8 +856,8 @@ exports.handler = async (event, context) => {
           accessLevel: 'reader',
           status: 'processing_background'
         },
-        emailSent: true,
-        emailStatus: 'processing_background',
+        emailSent: !!transporter,
+        emailStatus: transporter ? 'processing_background' : 'smtp_not_configured',
         dniUploaded: {
           delante: !!dniUrls.dniDelanteUrl,
           detras: !!dniUrls.dniDetrasUrl,

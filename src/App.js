@@ -9,6 +9,45 @@ const API_BASE = process.env.NODE_ENV === 'production'
 // Detectar móvil
 const isMobile = /Mobi|Android/i.test(navigator.userAgent);
 
+// Componente Loading Spinner
+const LoadingSpinner = ({ message = 'Procesando...' }) => (
+  <div style={{
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 9999
+  }}>
+    <div style={{
+      width: '60px',
+      height: '60px',
+      border: '5px solid #f3f3f3',
+      borderTop: '5px solid #667eea',
+      borderRadius: '50%',
+      animation: 'spin 1s linear infinite'
+    }}></div>
+    <p style={{
+      color: 'white',
+      marginTop: '20px',
+      fontSize: '18px',
+      fontWeight: 'bold'
+    }}>{message}</p>
+    {isMobile && (
+      <p style={{
+        color: '#ccc',
+        marginTop: '10px',
+        fontSize: '14px'
+      }}>Esto puede tardar un momento en móvil...</p>
+    )}
+  </div>
+);
+
 // Función de compresión de imágenes para móviles
 const compressImageForMobile = (file, quality = 0.7) => {
   return new Promise((resolve) => {
@@ -44,6 +83,7 @@ const compressImageForMobile = (file, quality = 0.7) => {
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('Procesando...');
   const [message, setMessage] = useState('');
 
   // Registro de trabajador - Campos de dirección separados + DNI fotos
@@ -76,6 +116,19 @@ function App() {
     console.log(`📱 App inicializada - Móvil: ${isMobile}`);
     console.log(`🌐 API Base: ${API_BASE}`);
     console.log(`🔧 User Agent: ${navigator.userAgent}`);
+  }, []);
+
+  // Agregar estilos para la animación del spinner
+  useEffect(() => {
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+    `;
+    document.head.appendChild(style);
+    return () => document.head.removeChild(style);
   }, []);
 
   const handleInputChange = (e, form = 'register') => {
@@ -118,11 +171,15 @@ function App() {
         setMessage('📱 Optimizando imagen para móvil...');
         
         try {
-          processedFile = await compressImageForMobile(file, 0.7);
-          console.log(`✅ Imagen comprimida: ${file.size} → ${processedFile.size}`);
+          const compressedBlob = await compressImageForMobile(file, 0.7);
           
-          // Crear nuevo nombre para el archivo comprimido
-          processedFile.name = file.name.replace(/\.[^/.]+$/, '_compressed.jpg');
+          // Crear File desde Blob
+          processedFile = new File([compressedBlob], file.name.replace(/\.[^/.]+$/, '_compressed.jpg'), {
+            type: 'image/jpeg',
+            lastModified: Date.now()
+          });
+          
+          console.log(`✅ Imagen comprimida: ${file.size} → ${processedFile.size}`);
           
           setMessage('✅ Imagen optimizada correctamente');
           setTimeout(() => setMessage(''), 2000);
@@ -151,6 +208,7 @@ function App() {
     }
 
     setLoading(true);
+    setLoadingMessage('Registrando trabajador...');
     setMessage('');
 
     try {
@@ -192,8 +250,21 @@ function App() {
         dniDetrasSize: formData.dniDetras?.size
       });
 
+      // Actualizar mensaje de loading según progreso
+      setTimeout(() => {
+        if (loading) setLoadingMessage('Creando carpetas en Google Drive...');
+      }, 3000);
+      
+      setTimeout(() => {
+        if (loading) setLoadingMessage('Subiendo documentos...');
+      }, 8000);
+
+      setTimeout(() => {
+        if (loading) setLoadingMessage('Configurando permisos...');
+      }, 15000);
+
       // Timeout más largo para móviles
-      const timeoutMs = isMobile ? 60000 : 30000; // 60s móvil, 30s escritorio
+      const timeoutMs = isMobile ? 90000 : 45000; // 90s móvil, 45s escritorio
       
       const fetchPromise = fetch(`${API_BASE}/register-worker`, {
         method: 'POST',
@@ -232,6 +303,13 @@ function App() {
           console.log(`⏱️ Tiempo de procesamiento: ${result.processingTime}ms`);
         }
         
+        // Mostrar advertencia si el email no se configuró
+        if (!result.emailSent) {
+          setTimeout(() => {
+            setMessage('⚠️ Nota: El servidor de email no está configurado. No recibirás email de confirmación.');
+          }, 3000);
+        }
+        
       } else {
         setMessage(`❌ Error: ${result.error || 'Error desconocido'}`);
         
@@ -239,12 +317,20 @@ function App() {
         if (result.details) {
           console.error('📋 Detalles del error:', result.details);
         }
+        
+        if (result.camposFaltantes) {
+          console.error('📋 Campos faltantes:', result.camposFaltantes);
+        }
+        
+        if (result.archivosRecibidos) {
+          console.error('📋 Archivos recibidos:', result.archivosRecibidos);
+        }
       }
     } catch (error) {
       console.error('❌ Error en registro:', error);
       
       if (error.message.includes('Timeout')) {
-        setMessage('⏰ La operación tardó más de lo esperado. Por favor, inténtalo de nuevo.');
+        setMessage('⏰ La operación tardó más de lo esperado. Por favor, verifica tu conexión e inténtalo de nuevo.');
       } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
         setMessage('🌐 Error de conexión. Verifica tu conexión a internet.');
       } else {
@@ -252,12 +338,14 @@ function App() {
       }
     } finally {
       setLoading(false);
+      setLoadingMessage('Procesando...');
     }
   };
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
+    setLoadingMessage('Accediendo a tus documentos...');
     setMessage('');
 
     try {
@@ -289,6 +377,7 @@ function App() {
       setMessage('❌ Error de conexión. Por favor, inténtalo de nuevo.');
     } finally {
       setLoading(false);
+      setLoadingMessage('Procesando...');
     }
   };
 
@@ -456,6 +545,8 @@ function App() {
 
   return (
     <div className="container">
+      {loading && <LoadingSpinner message={loadingMessage} />}
+      
       <h1>Sistema de Gestión Documental</h1>
       
       {/* Indicador de móvil para debug */}
