@@ -182,7 +182,7 @@ function App() {
       formDataToSend.append('dniDelante', formData.dniDelante);
       formDataToSend.append('dniDetras', formData.dniDetras);
 
-      console.log('📤 Enviando formulario a:', `${API_BASE}/registrar-trabajador`);
+      console.log('📤 Enviando formulario a:', `${API_BASE}/register-worker`);
       console.log('📊 Datos del formulario:', {
         nombre: formData.nombre,
         dni: formData.dni,
@@ -195,7 +195,7 @@ function App() {
       // Timeout más largo para móviles
       const timeoutMs = isMobile ? 60000 : 30000; // 60s móvil, 30s escritorio
       
-      const fetchPromise = fetch(`${API_BASE}/registrar-trabajador`, {
+      const fetchPromise = fetch(`${API_BASE}/register-worker`, {
         method: 'POST',
         body: formDataToSend
         // NO establecer Content-Type header cuando uses FormData

@@ -385,24 +385,39 @@ function grantPermissionsAsync(drive, carpetaId, subcarpetasIds, workerEmail, do
 function parseFormData(event) {
   return new Promise((resolve, reject) => {
     try {
-      console.log('🔍 Analizando content-type:', event.headers['content-type']);
+      console.log('🔍 Headers recibidos:', JSON.stringify(event.headers, null, 2));
       console.log('🔍 Body length:', event.body?.length || 0);
       console.log('🔍 Is base64:', event.isBase64Encoded);
+      
+      const contentType = event.headers['content-type'] || event.headers['Content-Type'] || '';
+      console.log('🔍 Content-Type:', contentType);
+      
+      if (!contentType.includes('multipart/form-data')) {
+        reject(new Error('Content-Type debe ser multipart/form-data'));
+        return;
+      }
       
       const form = new multiparty.Form({
         maxFilesSize: 50 * 1024 * 1024, // 50MB máximo
         maxFields: 20,
-        maxFieldsSize: 10 * 1024 * 1024 // 10MB para campos
+        maxFieldsSize: 10 * 1024 * 1024, // 10MB para campos
+        autoFields: true,
+        autoFiles: true
       });
       
       let bodyBuffer;
-      if (event.isBase64Encoded) {
-        bodyBuffer = Buffer.from(event.body, 'base64');
-      } else {
-        bodyBuffer = Buffer.from(event.body, 'utf8');
+      try {
+        if (event.isBase64Encoded) {
+          bodyBuffer = Buffer.from(event.body, 'base64');
+        } else {
+          bodyBuffer = Buffer.from(event.body, 'binary');
+        }
+        console.log('📦 Buffer creado, tamaño:', bodyBuffer.length);
+      } catch (bufferError) {
+        console.error('❌ Error creando buffer:', bufferError);
+        reject(new Error('Error procesando datos del formulario'));
+        return;
       }
-
-      console.log('📦 Buffer creado, tamaño:', bodyBuffer.length);
 
       const { Readable } = require('stream');
       const bodyStream = new Readable();
@@ -411,60 +426,108 @@ function parseFormData(event) {
       
       // Headers críticos para móvil
       bodyStream.headers = {
-        ...event.headers,
-        'content-length': bodyBuffer.length.toString()
+        'content-type': contentType,
+        'content-length': bodyBuffer.length.toString(),
+        ...event.headers
       };
       bodyStream.method = 'POST';
 
       const fields = {};
       const files = {};
+      let errorOccurred = false;
 
       form.on('field', (name, value) => {
-        fields[name] = value;
-        console.log(`📝 Campo recibido: ${name} = ${value?.substring(0, 50)}...`);
+        if (!errorOccurred) {
+          fields[name] = value;
+          console.log(`📝 Campo recibido: ${name} = ${typeof value === 'string' ? value.substring(0, 50) : value}...`);
+        }
       });
 
       form.on('part', (part) => {
+        if (errorOccurred) return;
+        
         console.log(`📎 Parte recibida: ${part.name}, filename: ${part.filename}`);
         
         if (part.filename) {
           const chunks = [];
+          
           part.on('data', (chunk) => {
-            chunks.push(chunk);
+            if (!errorOccurred) {
+              chunks.push(chunk);
+            }
           });
+          
           part.on('end', () => {
-            const buffer = Buffer.concat(chunks);
-            files[part.name] = {
-              originalFilename: part.filename,
-              headers: part.headers,
-              buffer: buffer
-            };
-            console.log(`✅ Archivo procesado: ${part.name}, tamaño: ${buffer.length}`);
+            if (!errorOccurred) {
+              const buffer = Buffer.concat(chunks);
+              files[part.name] = {
+                originalFilename: part.filename,
+                headers: part.headers || { 'content-type': 'application/octet-stream' },
+                buffer: buffer
+              };
+              console.log(`✅ Archivo procesado: ${part.name}, tamaño: ${buffer.length}`);
+            }
           });
+          
           part.on('error', (error) => {
-            console.error(`❌ Error en parte ${part.name}:`, error);
+            if (!errorOccurred) {
+              console.error(`❌ Error en parte ${part.name}:`, error);
+              errorOccurred = true;
+              reject(error);
+            }
           });
         }
       });
 
       form.on('error', (error) => {
-        console.error('❌ Error en multiparty:', error);
-        reject(error);
+        if (!errorOccurred) {
+          console.error('❌ Error en multiparty:', error);
+          errorOccurred = true;
+          reject(error);
+        }
       });
       
       form.on('close', () => {
-        console.log('✅ FormData parseado correctamente');
-        console.log('📊 Campos:', Object.keys(fields));
-        console.log('📊 Archivos:', Object.keys(files));
-        resolve({ fields, files });
+        if (!errorOccurred) {
+          console.log('✅ FormData parseado correctamente');
+          console.log('📊 Campos:', Object.keys(fields));
+          console.log('📊 Archivos:', Object.keys(files));
+          resolve({ fields, files });
+        }
       });
 
-      // Timeout de seguridad para móvil
-      setTimeout(() => {
-        reject(new Error('Timeout parseando FormData'));
-      }, 30000);
+      // Timeout de seguridad más largo para móvil
+      const timeoutMs = 45000; // 45 segundos
+      const timeoutId = setTimeout(() => {
+        if (!errorOccurred) {
+          errorOccurred = true;
+          reject(new Error(`Timeout parseando FormData después de ${timeoutMs/1000}s`));
+        }
+      }, timeoutMs);
 
-      form.parse(bodyStream);
+      // Limpiar timeout al resolver
+      const originalResolve = resolve;
+      const originalReject = reject;
+      
+      resolve = (value) => {
+        clearTimeout(timeoutId);
+        originalResolve(value);
+      };
+      
+      reject = (error) => {
+        clearTimeout(timeoutId);
+        originalReject(error);
+      };
+
+      try {
+        form.parse(bodyStream);
+      } catch (parseError) {
+        console.error('❌ Error iniciando parseo:', parseError);
+        if (!errorOccurred) {
+          errorOccurred = true;
+          reject(parseError);
+        }
+      }
       
     } catch (error) {
       console.error('❌ Error crítico en parseFormData:', error);
@@ -525,7 +588,8 @@ exports.handler = async (event, context) => {
       }
 
       // Parsear según content-type
-      const contentType = event.headers['content-type'] || '';
+      const contentType = event.headers['content-type'] || event.headers['Content-Type'] || '';
+      console.log('📋 Content-Type detectado:', contentType);
       
       if (contentType.includes('application/json')) {
         console.log('📝 Parseando JSON...');
@@ -553,7 +617,11 @@ exports.handler = async (event, context) => {
         return {
           statusCode: 400,
           headers,
-          body: JSON.stringify({ error: 'Tipo de contenido no soportado' })
+          body: JSON.stringify({ 
+            error: 'Tipo de contenido no soportado',
+            contentType: contentType,
+            expectedTypes: ['multipart/form-data', 'application/json']
+          })
         };
       }
       
@@ -561,12 +629,15 @@ exports.handler = async (event, context) => {
       
     } catch (parseError) {
       console.error('❌ Error parseando datos:', parseError.message);
+      console.error('❌ Stack trace:', parseError.stack);
+      
       return {
         statusCode: 400,
         headers,
         body: JSON.stringify({ 
           error: 'Error procesando formulario',
-          details: parseError.message
+          details: parseError.message,
+          type: 'PARSE_ERROR'
         })
       };
     }
