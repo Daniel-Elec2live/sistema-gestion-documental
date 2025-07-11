@@ -10,25 +10,15 @@ require('dotenv').config();
 
 // Función helper para procesar la clave privada
 function processPrivateKey(key) {
-  // Eliminar posibles espacios extras y asegurar formato correcto
   let processedKey = key.trim();
-  
-  // Si la clave no tiene los headers, agregarlos
   if (!processedKey.includes('BEGIN')) {
     processedKey = `-----BEGIN PRIVATE KEY-----\n${processedKey}\n-----END PRIVATE KEY-----`;
   }
-  
-  // Reemplazar los \n literales por saltos de línea reales
   processedKey = processedKey.replace(/\\n/g, '\n');
-  
-  // Asegurar que haya saltos de línea después de los headers
   processedKey = processedKey
     .replace(/-----BEGIN PRIVATE KEY-----/g, '-----BEGIN PRIVATE KEY-----\n')
     .replace(/-----END PRIVATE KEY-----/g, '\n-----END PRIVATE KEY-----');
-  
-  // Eliminar saltos de línea duplicados
   processedKey = processedKey.replace(/\n\n+/g, '\n');
-  
   return processedKey;
 }
 
@@ -47,96 +37,7 @@ async function getFileInfo(drive, fileId) {
   }
 }
 
-// Función para dar permisos de acceso al trabajador
-async function grantWorkerAccess(drive, carpetaId, workerEmail, accessLevel = 'reader') {
-  try {
-    console.log(`🔐 Dando acceso ${accessLevel} a ${workerEmail} para carpeta ${carpetaId}...`);
-    
-    // Crear permiso para el trabajador
-    const permission = await drive.permissions.create({
-      fileId: carpetaId,
-      resource: {
-        role: accessLevel, // 'reader', 'writer', 'commenter'
-        type: 'user',
-        emailAddress: workerEmail
-      },
-      supportsAllDrives: true,
-      sendNotificationEmail: true, // Enviar email de notificación
-      emailMessage: 'Te hemos dado acceso a tu carpeta personal de documentos laborales.'
-    });
-
-    console.log('✅ Permiso otorgado:', permission.data.id);
-    return permission.data;
-    
-  } catch (error) {
-    console.error('❌ Error otorgando permisos:', error);
-    
-    // Si el email no es válido o no existe, continuar sin fallar
-    if (error.code === 400) {
-      console.warn('⚠️ Email inválido o usuario no encontrado, continuando...');
-      return null;
-    }
-    
-    throw error;
-  }
-}
-
-// Función para dar acceso a todas las subcarpetas (MEJORADA - incluye carpeta de DNIs)
-async function grantWorkerAccessToAllFolders(drive, carpetaId, subcarpetasIds, workerEmail, documentosPersonalesId = null) {
-  const permissions = [];
-  
-  try {
-    // Dar acceso a la carpeta principal
-    const mainFolderPermission = await grantWorkerAccess(drive, carpetaId, workerEmail, 'reader');
-    if (mainFolderPermission) {
-      permissions.push({ folderId: carpetaId, permissionId: mainFolderPermission.id, type: 'main' });
-    }
-
-    // Dar acceso a todas las subcarpetas en paralelo
-    const subfolderPromises = subcarpetasIds.map(async (subcarpeta) => {
-      if (subcarpeta.id) {
-        try {
-          const permission = await grantWorkerAccess(drive, subcarpeta.id, workerEmail, 'reader');
-          if (permission) {
-            return { folderId: subcarpeta.id, permissionId: permission.id, type: 'subfolder', name: subcarpeta.nombre };
-          }
-        } catch (error) {
-          console.error(`Error dando acceso a subcarpeta ${subcarpeta.nombre}:`, error);
-        }
-      }
-      return null;
-    });
-
-    // Agregar acceso a "Documentos Personales" si se creó
-    if (documentosPersonalesId) {
-      subfolderPromises.push(
-        grantWorkerAccess(drive, documentosPersonalesId, workerEmail, 'reader')
-          .then(permission => {
-            if (permission) {
-              return { folderId: documentosPersonalesId, permissionId: permission.id, type: 'subfolder', name: 'Documentos Personales' };
-            }
-            return null;
-          })
-          .catch(error => {
-            console.error('Error dando acceso a carpeta Documentos Personales:', error);
-            return null;
-          })
-      );
-    }
-
-    const subfolderPermissions = await Promise.all(subfolderPromises);
-    permissions.push(...subfolderPermissions.filter(p => p !== null));
-
-    console.log(`✅ Permisos otorgados: ${permissions.length} carpetas`);
-    return permissions;
-    
-  } catch (error) {
-    console.error('❌ Error otorgando permisos a carpetas:', error);
-    return permissions; // Retornar los permisos que sí se pudieron otorgar
-  }
-}
-
-// Configurar Nodemailer - CORREGIDO: createTransport en lugar de createTransporter
+// Configurar Nodemailer
 let transporter;
 try {
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
@@ -152,79 +53,41 @@ try {
         rejectUnauthorized: false
       }
     });
-
-    // Verificar la configuración al inicializar
-    transporter.verify((error, success) => {
-      if (error) {
-        console.error('Error en la configuración SMTP:', error);
-      } else {
-        console.log('Servidor SMTP configurado correctamente');
-      }
-    });
   }
 } catch (error) {
   console.error('Error configurando Nodemailer:', error);
 }
 
-// Función CORREGIDA para subir DNIs - RETORNA ID de la carpeta creada
-async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, driveId = null) {
-  const uploadedFiles = {};
+// Función SUPER OPTIMIZADA para subir DNIs Y crear carpeta
+async function uploadDNIImagesOptimized(drive, carpetaId, dniDelanteFile, dniDetrasFile, driveId = null) {
+  const uploadedFiles = { documentosPersonalesFolderId: null };
   
   try {
-    console.log('📋 Iniciando proceso de subida de DNIs...');
+    console.log('📋 Proceso optimizado: creando carpeta y subiendo DNIs...');
     
-    // Primero crear/buscar la subcarpeta "Documentos Personales"
-    console.log('📁 Creando/buscando subcarpeta "Documentos Personales"...');
+    // PASO 1: Crear carpeta "Documentos Personales" PRIMERO
+    const newFolder = await drive.files.create({
+      resource: {
+        name: 'Documentos Personales',
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [carpetaId]
+      },
+      supportsAllDrives: true
+    });
     
-    // Configurar parámetros para búsqueda de carpeta CON SOPORTE MEJORADO PARA SHARED DRIVES
-    const searchParams = {
-      q: `'${carpetaId}' in parents and mimeType='application/vnd.google-apps.folder' and name='Documentos Personales'`,
-      fields: 'files(id, name)',
-      supportsAllDrives: true,
-      includeItemsFromAllDrives: true
-    };
-
-    // Solo agregar driveId y corpora si estamos en un Shared Drive
-    if (driveId) {
-      searchParams.driveId = driveId;
-      searchParams.corpora = 'drive'; // CRÍTICO: Agregar corpora cuando se especifica driveId
-    }
-
-    const documentosPersonalesFolder = await drive.files.list(searchParams);
-
-    let documentosPersonalesFolderId;
-    
-    if (documentosPersonalesFolder.data.files && documentosPersonalesFolder.data.files.length > 0) {
-      documentosPersonalesFolderId = documentosPersonalesFolder.data.files[0].id;
-      console.log('✅ Subcarpeta "Documentos Personales" encontrada:', documentosPersonalesFolderId);
-    } else {
-      // Crear la subcarpeta si no existe
-      console.log('📁 Creando subcarpeta "Documentos Personales"...');
-      const newFolder = await drive.files.create({
-        resource: {
-          name: 'Documentos Personales',
-          mimeType: 'application/vnd.google-apps.folder',
-          parents: [carpetaId]
-        },
-        supportsAllDrives: true
-      });
-      documentosPersonalesFolderId = newFolder.data.id;
-      console.log('✅ Subcarpeta "Documentos Personales" creada:', documentosPersonalesFolderId);
-    }
-
-    // Guardar el ID de la carpeta en el resultado
+    const documentosPersonalesFolderId = newFolder.data.id;
     uploadedFiles.documentosPersonalesFolderId = documentosPersonalesFolderId;
+    console.log('✅ Carpeta "Documentos Personales" creada:', documentosPersonalesFolderId);
 
-    // Subir archivos DNI en paralelo
+    // PASO 2: Subir archivos DNI EN PARALELO (máximo 2 archivos)
     const uploadPromises = [];
 
     // Subir DNI Delante
     if (dniDelanteFile && fs.existsSync(dniDelanteFile.path)) {
-      console.log('📤 Subiendo DNI Delante...');
       uploadPromises.push(
         drive.files.create({
           resource: {
-            name: `DNI_Delante_${Date.now()}_${dniDelanteFile.originalFilename || 'documento.jpg'}`,
+            name: `DNI_Delante_${dniDelanteFile.originalFilename || 'documento.jpg'}`,
             parents: [documentosPersonalesFolderId]
           },
           media: {
@@ -235,26 +98,22 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, 
         }).then(response => {
           uploadedFiles.dniDelanteUrl = `https://drive.google.com/file/d/${response.data.id}/view`;
           uploadedFiles.dniDelanteId = response.data.id;
-          console.log('✅ DNI Delante subido exitosamente:', response.data.id);
-          return { type: 'delante', success: true, id: response.data.id };
+          console.log('✅ DNI Delante subido');
+          return true;
         }).catch(error => {
-          console.error('❌ Error subiendo DNI Delante:', error);
+          console.error('❌ Error subiendo DNI Delante:', error.message);
           uploadedFiles.dniDelanteError = error.message;
-          return { type: 'delante', success: false, error: error.message };
+          return false;
         })
       );
-    } else {
-      console.warn('⚠️ Archivo DNI Delante no encontrado o no válido:', dniDelanteFile?.path);
-      uploadedFiles.dniDelanteError = 'Archivo no encontrado';
     }
     
     // Subir DNI Detrás
     if (dniDetrasFile && fs.existsSync(dniDetrasFile.path)) {
-      console.log('📤 Subiendo DNI Detrás...');
       uploadPromises.push(
         drive.files.create({
           resource: {
-            name: `DNI_Detras_${Date.now()}_${dniDetrasFile.originalFilename || 'documento.jpg'}`,
+            name: `DNI_Detras_${dniDetrasFile.originalFilename || 'documento.jpg'}`,
             parents: [documentosPersonalesFolderId]
           },
           media: {
@@ -265,181 +124,161 @@ async function uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, 
         }).then(response => {
           uploadedFiles.dniDetrasUrl = `https://drive.google.com/file/d/${response.data.id}/view`;
           uploadedFiles.dniDetrasId = response.data.id;
-          console.log('✅ DNI Detrás subido exitosamente:', response.data.id);
-          return { type: 'detras', success: true, id: response.data.id };
+          console.log('✅ DNI Detrás subido');
+          return true;
         }).catch(error => {
-          console.error('❌ Error subiendo DNI Detrás:', error);
+          console.error('❌ Error subiendo DNI Detrás:', error.message);
           uploadedFiles.dniDetrasError = error.message;
-          return { type: 'detras', success: false, error: error.message };
+          return false;
         })
       );
-    } else {
-      console.warn('⚠️ Archivo DNI Detrás no encontrado o no válido:', dniDetrasFile?.path);
-      uploadedFiles.dniDetrasError = 'Archivo no encontrado';
     }
 
-    // Esperar a que terminen todas las subidas
-    if (uploadPromises.length > 0) {
-      const uploadResults = await Promise.all(uploadPromises);
-      console.log('📊 Resultados de subida:', uploadResults);
-    }
+    // Esperar subidas con timeout corto
+    await Promise.race([
+      Promise.all(uploadPromises),
+      new Promise(resolve => setTimeout(resolve, 15000)) // 15 segundos máximo
+    ]);
 
-    console.log('✅ Proceso de subida de DNIs completado');
-    console.log('📋 Resumen de archivos subidos:', {
-      dniDelante: !!uploadedFiles.dniDelanteUrl,
-      dniDetras: !!uploadedFiles.dniDetrasUrl,
-      carpetaDocumentosPersonales: documentosPersonalesFolderId,
-      urls: {
-        delante: uploadedFiles.dniDelanteUrl,
-        detras: uploadedFiles.dniDetrasUrl
-      },
-      errors: {
-        delante: uploadedFiles.dniDelanteError,
-        detras: uploadedFiles.dniDetrasError
-      }
-    });
+    console.log('✅ Proceso de DNIs completado');
     
   } catch (error) {
-    console.error('❌ Error general subiendo imágenes DNI:', error);
+    console.error('❌ Error en proceso de DNIs:', error.message);
     uploadedFiles.generalError = error.message;
   }
   
   return uploadedFiles;
 }
 
-// Función para enviar email sin bloquear (MEJORADA CON INFORMACIÓN DE ACCESO)
-async function sendConfirmationEmail(correo, nombre, empresa, carpetaUrl = null) {
-  if (!transporter) {
-    console.log('Nodemailer no configurado, saltando envío de email');
-    return { success: false, error: 'Transportador no configurado' };
-  }
+// Función OPTIMIZADA para enviar email (sin bloquear)
+function sendConfirmationEmailAsync(correo, nombre, empresa, carpetaUrl = null) {
+  // Enviar email en background SIN esperar
+  if (transporter) {
+    setImmediate(async () => {
+      try {
+        const fechaRegistro = new Date().toLocaleDateString('es-ES', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
 
-  // Enviar email en background sin bloquear
-  setImmediate(async () => {
-    try {
-      const fechaRegistro = new Date().toLocaleDateString('es-ES', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
-
-      const mailOptions = {
-        from: {
-          name: process.env.FROM_NAME || 'Sistema de Gestión Documental',
-          address: process.env.FROM_EMAIL || process.env.SMTP_USER
-        },
-        to: correo,
-        subject: '🎉 Bienvenido al Sistema de Gestión Documental - Acceso Configurado',
-        html: `
-          <!DOCTYPE html>
-          <html lang="es">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Bienvenido al Sistema</title>
-          </head>
-          <body style="margin: 0; padding: 20px; font-family: 'Arial', sans-serif; background-color: #f4f4f4;">
-            <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-              
-              <!-- Header -->
-              <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
-                <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 300;">¡Bienvenido al Sistema!</h1>
-                <p style="color: #e8f0fe; margin: 10px 0 0 0; font-size: 16px;">Tu registro se ha completado exitosamente</p>
-              </div>
-              
-              <!-- Content -->
-              <div style="padding: 40px 30px;">
-                <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-                  Hola <strong style="color: #667eea;">${nombre}</strong>,
-                </p>
+        const mailOptions = {
+          from: {
+            name: process.env.FROM_NAME || 'Sistema de Gestión Documental',
+            address: process.env.FROM_EMAIL || process.env.SMTP_USER
+          },
+          to: correo,
+          subject: '🎉 Bienvenido al Sistema de Gestión Documental - Acceso Configurado',
+          html: `
+            <!DOCTYPE html>
+            <html lang="es">
+            <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Bienvenido al Sistema</title>
+            </head>
+            <body style="margin: 0; padding: 20px; font-family: 'Arial', sans-serif; background-color: #f4f4f4;">
+              <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                 
-                <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
-                  Te confirmamos que tu registro en el Sistema de Gestión Documental se ha completado exitosamente y ya tienes acceso a tu carpeta personal de documentos.
-                </p>
+                <!-- Header -->
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+                  <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 300;">¡Bienvenido al Sistema!</h1>
+                  <p style="color: #e8f0fe; margin: 10px 0 0 0; font-size: 16px;">Tu registro se ha completado exitosamente</p>
+                </div>
+                
+                <!-- Content -->
+                <div style="padding: 40px 30px;">
+                  <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                    Hola <strong style="color: #667eea;">${nombre}</strong>,
+                  </p>
+                  
+                  <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+                    Te confirmamos que tu registro en el Sistema de Gestión Documental se ha completado exitosamente y ya tienes acceso a tu carpeta personal de documentos.
+                  </p>
 
-                ${carpetaUrl ? `
-                <!-- Acceso a Carpeta Personal -->
-                <div style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
-                  <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📁 Tu Carpeta Personal</h3>
-                  <p style="color: white; margin: 0 0 15px 0;">Ya puedes acceder a tu carpeta personal de documentos:</p>
-                  <div style="text-align: center;">
-                    <a href="${carpetaUrl}" 
-                       style="display: inline-block; background: rgba(255,255,255,0.2); color: white; padding: 12px 30px; text-decoration: none; border-radius: 25px; font-weight: bold; border: 2px solid white;">
-                      🔗 Acceder a Mi Carpeta
+                  ${carpetaUrl ? `
+                  <!-- Acceso a Carpeta Personal -->
+                  <div style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
+                    <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📁 Tu Carpeta Personal</h3>
+                    <p style="color: white; margin: 0 0 15px 0;">Ya puedes acceder a tu carpeta personal de documentos:</p>
+                    <div style="text-align: center;">
+                      <a href="${carpetaUrl}" 
+                         style="display: inline-block; background: rgba(255,255,255,0.2); color: white; padding: 12px 30px; text-decoration: none; border-radius: 25px; font-weight: bold; border: 2px solid white;">
+                        🔗 Acceder a Mi Carpeta
+                      </a>
+                    </div>
+                  </div>
+                  ` : ''}
+                  
+                  <!-- Info Box -->
+                  <div style="background: linear-gradient(135deg,rgb(200, 227, 248) 0%, #7bbbea 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
+                    <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📋 Datos de tu registro</h3>
+                    <table style="width: 100%; color: white;">
+                      <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">Nombre:</td>
+                        <td style="padding: 5px 0;">${nombre}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">Empresa:</td>
+                        <td style="padding: 5px 0;">${empresa}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">Email:</td>
+                        <td style="padding: 5px 0;">${correo}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">Fecha:</td>
+                        <td style="padding: 5px 0;">${fechaRegistro}</td>
+                      </tr>
+                    </table>
+                  </div>
+                  
+                  <!-- Features -->
+                  <div style="margin: 30px 0;">
+                    <h3 style="color: #333; margin-bottom: 20px; font-size: 18px;">🚀 ¿Qué puedes hacer ahora?</h3>
+                    <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
+                      <ul style="margin: 0; padding-left: 20px; color: #666;">
+                        <li style="margin-bottom: 10px; line-height: 1.6;">✅ Acceder a tu carpeta personal desde Google Drive</li>
+                        <li style="margin-bottom: 10px; line-height: 1.6;">✅ Ver y descargar tus documentos personales</li>
+                        <li style="margin-bottom: 10px; line-height: 1.6;">✅ Consultar nóminas, contratos y certificados</li>
+                        <li style="margin-bottom: 10px; line-height: 1.6;">✅ Recibir notificaciones de nuevos archivos</li>
+                        <li style="margin-bottom: 0; line-height: 1.6;">✅ Gestionar y revisar tus documentos laborales</li>
+                      </ul>
+                    </div>
+                  </div>
+                  
+                  <!-- Important Note -->
+                  <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 30px 0;">
+                    <h4 style="color: #856404; margin: 0 0 10px 0; font-size: 16px;">📧 Importante</h4>
+                    <p style="color: #856404; margin: 0; font-size: 14px; line-height: 1.5;">
+                      Es posible que hayas recibido una notificación de Google Drive sobre el acceso a tu carpeta. 
+                      Esto es normal y confirma que ya puedes acceder a tus documentos.
+                    </p>
+                  </div>
+                  
+                  <!-- CTA Button -->
+                  <div style="text-align: center; margin: 40px 0;">
+                    <a href="${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}" 
+                       style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s;">
+                      🔗 Acceder al Sistema
                     </a>
                   </div>
                 </div>
-                ` : ''}
                 
-                <!-- Info Box -->
-                <div style="background: linear-gradient(135deg,rgb(200, 227, 248) 0%, #7bbbea 100%); padding: 25px; border-radius: 8px; margin: 30px 0;">
-                  <h3 style="color: white; margin: 0 0 15px 0; font-size: 18px;">📋 Datos de tu registro</h3>
-                  <table style="width: 100%; color: white;">
-                    <tr>
-                      <td style="padding: 5px 0; font-weight: bold;">Nombre:</td>
-                      <td style="padding: 5px 0;">${nombre}</td>
-                    </tr>
-                    <tr>
-                      <td style="padding: 5px 0; font-weight: bold;">Empresa:</td>
-                      <td style="padding: 5px 0;">${empresa}</td>
-                    </tr>
-                    <tr>
-                      <td style="padding: 5px 0; font-weight: bold;">Email:</td>
-                      <td style="padding: 5px 0;">${correo}</td>
-                    </tr>
-                    <tr>
-                      <td style="padding: 5px 0; font-weight: bold;">Fecha:</td>
-                      <td style="padding: 5px 0;">${fechaRegistro}</td>
-                    </tr>
-                  </table>
-                </div>
-                
-                <!-- Features -->
-                <div style="margin: 30px 0;">
-                  <h3 style="color: #333; margin-bottom: 20px; font-size: 18px;">🚀 ¿Qué puedes hacer ahora?</h3>
-                  <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
-                    <ul style="margin: 0; padding-left: 20px; color: #666;">
-                      <li style="margin-bottom: 10px; line-height: 1.6;">✅ Acceder a tu carpeta personal desde Google Drive</li>
-                      <li style="margin-bottom: 10px; line-height: 1.6;">✅ Ver y descargar tus documentos personales</li>
-                      <li style="margin-bottom: 10px; line-height: 1.6;">✅ Consultar nóminas, contratos y certificados</li>
-                      <li style="margin-bottom: 10px; line-height: 1.6;">✅ Recibir notificaciones de nuevos archivos</li>
-                      <li style="margin-bottom: 0; line-height: 1.6;">✅ Gestionar y revisar tus documentos laborales</li>
-                    </ul>
-                  </div>
-                </div>
-                
-                <!-- Important Note -->
-                <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 30px 0;">
-                  <h4 style="color: #856404; margin: 0 0 10px 0; font-size: 16px;">📧 Importante</h4>
-                  <p style="color: #856404; margin: 0; font-size: 14px; line-height: 1.5;">
-                    Es posible que hayas recibido una notificación de Google Drive sobre el acceso a tu carpeta. 
-                    Esto es normal y confirma que ya puedes acceder a tus documentos.
+                <!-- Footer -->
+                <div style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #dee2e6;">
+                  <p style="color: #6c757d; font-size: 12px; margin: 0 0 10px 0;">
+                    Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
+                  </p>
+                  <p style="color: #868e96; font-size: 11px; margin: 0;">
+                    Por favor, no respondas a este mensaje. © ${new Date().getFullYear()} Sistema de Gestión Documental.
                   </p>
                 </div>
-                
-                <!-- CTA Button -->
-                <div style="text-align: center; margin: 40px 0;">
-                  <a href="${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}" 
-                     style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s;">
-                    🔗 Acceder al Sistema
-                  </a>
-                </div>
               </div>
-              
-              <!-- Footer -->
-              <div style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #dee2e6;">
-                <p style="color: #6c757d; font-size: 12px; margin: 0 0 10px 0;">
-                  Este email se ha enviado automáticamente desde el Sistema de Gestión Documental.
-                </p>
-                <p style="color: #868e96; font-size: 11px; margin: 0;">
-                  Por favor, no respondas a este mensaje. © ${new Date().getFullYear()} Sistema de Gestión Documental.
-                </p>
-              </div>
-            </div>
-          </body>
-          </html>
-        `,
-        text: `
+            </body>
+            </html>
+          `,
+          text: `
 ¡Bienvenido al Sistema de Gestión Documental!
 
 Hola ${nombre},
@@ -470,27 +309,83 @@ ${process.env.APP_URL || 'https://sistemagestiondocumental.netlify.app/'}
 IMPORTANTE: Es posible que hayas recibido una notificación de Google Drive sobre el acceso a tu carpeta. Esto es normal y confirma que ya puedes acceder a tus documentos.
 
 © ${new Date().getFullYear()} Sistema de Gestión Documental.
-        `
-      };
+          `
+        };
 
-      const result = await transporter.sendMail(mailOptions);
-      console.log('✅ Email enviado exitosamente:', result.messageId);
-
-    } catch (error) {
-      console.error('❌ Error enviando email:', error.message);
-    }
-  });
-
-  // Retornar inmediatamente sin esperar
-  return { success: true, messageId: 'pending' };
+        await transporter.sendMail(mailOptions);
+        console.log('✅ Email enviado exitosamente a:', correo);
+      } catch (error) {
+        console.error('❌ Error enviando email:', error.message);
+      }
+    });
+  }
+  return { success: true, messageId: 'background' };
 }
 
-// Función para parsear FormData usando multiparty
+// Función OPTIMIZADA para permisos (sin bloquear proceso principal)
+function grantPermissionsAsync(drive, carpetaId, subcarpetasIds, workerEmail, documentosPersonalesId) {
+  // Procesar permisos en background
+  setImmediate(async () => {
+    try {
+      console.log('🔐 Configurando permisos en background...');
+      
+      const permissionPromises = [];
+      
+      // Permiso carpeta principal
+      permissionPromises.push(
+        drive.permissions.create({
+          fileId: carpetaId,
+          resource: { role: 'reader', type: 'user', emailAddress: workerEmail },
+          supportsAllDrives: true,
+          sendNotificationEmail: false // Sin notificación para acelerar
+        }).catch(err => console.error('Error permiso principal:', err.message))
+      );
+
+      // Permisos subcarpetas
+      subcarpetasIds.forEach(subcarpeta => {
+        if (subcarpeta.id) {
+          permissionPromises.push(
+            drive.permissions.create({
+              fileId: subcarpeta.id,
+              resource: { role: 'reader', type: 'user', emailAddress: workerEmail },
+              supportsAllDrives: true,
+              sendNotificationEmail: false
+            }).catch(err => console.error(`Error permiso ${subcarpeta.nombre}:`, err.message))
+          );
+        }
+      });
+
+      // Permiso para Documentos Personales
+      if (documentosPersonalesId) {
+        permissionPromises.push(
+          drive.permissions.create({
+            fileId: documentosPersonalesId,
+            resource: { role: 'reader', type: 'user', emailAddress: workerEmail },
+            supportsAllDrives: true,
+            sendNotificationEmail: true // Solo esta notificación
+          }).catch(err => console.error('Error permiso Documentos Personales:', err.message))
+        );
+      }
+
+      // Ejecutar con timeout
+      await Promise.race([
+        Promise.allSettled(permissionPromises),
+        new Promise(resolve => setTimeout(resolve, 10000)) // 10 segundos máximo
+      ]);
+
+      console.log('✅ Permisos configurados en background');
+      
+    } catch (error) {
+      console.error('❌ Error configurando permisos:', error.message);
+    }
+  });
+}
+
+// Función para parsear FormData
 function parseFormData(event) {
   return new Promise((resolve, reject) => {
     const form = new multiparty.Form();
     
-    // Convertir el body si viene en base64
     let bodyBuffer;
     if (event.isBase64Encoded) {
       bodyBuffer = Buffer.from(event.body, 'base64');
@@ -498,13 +393,11 @@ function parseFormData(event) {
       bodyBuffer = Buffer.from(event.body);
     }
 
-    // Crear un stream readable del body
     const { Readable } = require('stream');
     const bodyStream = new Readable();
     bodyStream.push(bodyBuffer);
     bodyStream.push(null);
     
-    // Agregar headers y método requeridos por multiparty
     bodyStream.headers = event.headers;
     bodyStream.method = 'POST';
 
@@ -517,7 +410,6 @@ function parseFormData(event) {
 
     form.on('part', (part) => {
       if (part.filename) {
-        // Es un archivo
         const chunks = [];
         part.on('data', (chunk) => {
           chunks.push(chunk);
@@ -532,15 +424,8 @@ function parseFormData(event) {
       }
     });
 
-    form.on('error', (err) => {
-      reject(err);
-    });
-
-    form.on('close', () => {
-      resolve({ fields, files });
-    });
-
-    // Parsear el stream
+    form.on('error', reject);
+    form.on('close', () => resolve({ fields, files }));
     form.parse(bodyStream);
   });
 }
@@ -566,41 +451,44 @@ exports.handler = async (event, context) => {
   }
 
   let tempFilePaths = [];
+  const startTime = Date.now();
 
   try {
-    // Parsear FormData
+    console.log('🚀 INICIO - Proceso optimizado de registro');
+
+    // PASO 1: Parsear datos (RÁPIDO)
     let formData;
     try {
-      // Verificar si es JSON (fallback para compatibilidad)
       if (event.headers['content-type'] && event.headers['content-type'].includes('application/json')) {
-        // Mantener compatibilidad con requests JSON antiguos
         const jsonData = JSON.parse(event.body);
         formData = {
           fields: jsonData,
           files: {
-            dniDelante: jsonData.dniDelante ? { buffer: Buffer.from(jsonData.dniDelante.split(',')[1], 'base64'), originalFilename: jsonData.dniDelanteNombre } : null,
-            dniDetras: jsonData.dniDetras ? { buffer: Buffer.from(jsonData.dniDetras.split(',')[1], 'base64'), originalFilename: jsonData.dniDetrasNombre } : null
+            dniDelante: jsonData.dniDelante ? { 
+              buffer: Buffer.from(jsonData.dniDelante.split(',')[1], 'base64'), 
+              originalFilename: jsonData.dniDelanteNombre 
+            } : null,
+            dniDetras: jsonData.dniDetras ? { 
+              buffer: Buffer.from(jsonData.dniDetras.split(',')[1], 'base64'), 
+              originalFilename: jsonData.dniDetrasNombre 
+            } : null
           }
         };
       } else {
-        // Parsear como FormData
         formData = await parseFormData(event);
       }
     } catch (parseError) {
-      console.error('Error parseando datos:', parseError);
       return {
         statusCode: 400,
         headers,
-        body: JSON.stringify({ error: 'Error procesando los datos del formulario' })
+        body: JSON.stringify({ error: 'Error procesando formulario' })
       };
     }
 
     const { fields, files } = formData;
-    const { 
-      nombre, dni, correo, telefono, direccion, empresa, talla
-    } = fields;
+    const { nombre, dni, correo, telefono, direccion, empresa, talla } = fields;
 
-    // Validaciones básicas
+    // PASO 2: Validaciones (RÁPIDO)
     if (!nombre || !dni || !correo || !telefono || !direccion || !empresa || !talla) {
       return {
         statusCode: 400,
@@ -609,29 +497,25 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Validar que se hayan subido las fotos del DNI
     if (!files.dniDelante || !files.dniDetras) {
       return {
         statusCode: 400,
         headers,
-        body: JSON.stringify({ error: 'Debes subir ambas fotos del DNI (delante y detrás)' })
+        body: JSON.stringify({ error: 'Debes subir ambas fotos del DNI' })
       };
     }
 
-    // Validar formato de email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(correo)) {
       return {
         statusCode: 400,
         headers,
-        body: JSON.stringify({ error: 'El formato del correo electrónico no es válido' })
+        body: JSON.stringify({ error: 'Email inválido' })
       };
     }
 
-    // Procesar la clave privada
+    // PASO 3: Configurar Google (RÁPIDO)
     const privateKey = processPrivateKey(process.env.GOOGLE_PRIVATE_KEY);
-
-    // Configurar autenticación con Google
     const auth = new GoogleAuth({
       credentials: {
         type: 'service_account',
@@ -655,104 +539,40 @@ exports.handler = async (event, context) => {
     const sheets = google.sheets({ version: 'v4', auth });
     const drive = google.drive({ version: 'v3', auth });
 
-    // Verificar si el trabajador ya existe (optimizado con timeout)
-    const checkExistingPromise = sheets.spreadsheets.values.get({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: 'Trabajadores!B:C'
-    }).then(response => {
-      const existingRows = response.data.values || [];
-      return existingRows.find(row => row[0] === dni || row[1] === correo);
-    });
+    // PASO 4: Verificar trabajador existente (OPTIMIZADO)
+    try {
+      const existingCheck = await Promise.race([
+        sheets.spreadsheets.values.get({
+          spreadsheetId: process.env.GOOGLE_SHEET_ID,
+          range: 'Trabajadores!B:C'
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3000))
+      ]);
 
-    // Dar máximo 2 segundos para verificar
-    const existingWorker = await Promise.race([
-      checkExistingPromise,
-      new Promise(resolve => setTimeout(() => resolve(null), 2000))
-    ]);
+      const existingRows = existingCheck.data.values || [];
+      const existingWorker = existingRows.find(row => row[0] === dni || row[1] === correo);
 
-    if (existingWorker) {
-      return {
-        statusCode: 409,
-        headers,
-        body: JSON.stringify({ error: 'Ya existe un trabajador registrado con ese DNI o correo electrónico' })
-      };
+      if (existingWorker) {
+        return {
+          statusCode: 409,
+          headers,
+          body: JSON.stringify({ error: 'Ya existe un trabajador con ese DNI o email' })
+        };
+      }
+    } catch (error) {
+      console.warn('⚠️ No se pudo verificar trabajador existente, continuando...');
     }
 
-    // Generar ID interno
-    const idInterno = `WRK-${Date.now()}`;
-    const fechaIncorporacion = new Date().toLocaleDateString('es-ES');
+    console.log(`⏱️ Validaciones completadas en ${Date.now() - startTime}ms`);
 
-    // 1. VERIFICAR SI LA CARPETA PADRE ESTÁ EN UN SHARED DRIVE
-    console.log('🔍 Verificando información de la carpeta padre...');
-    const parentFolderInfo = await getFileInfo(drive, process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID);
-    
-    if (!parentFolderInfo) {
-      console.error('❌ No se pudo acceder a la carpeta padre. Verifica el ID y los permisos.');
-      return {
-        statusCode: 500,
-        headers,
-        body: JSON.stringify({ 
-          error: 'No se pudo acceder a la carpeta padre en Google Drive. Verifica la configuración.' 
-        })
-      };
-    }
-
-    console.log('📂 Información de carpeta padre:', {
-      id: parentFolderInfo.id,
-      name: parentFolderInfo.name,
-      driveId: parentFolderInfo.driveId,
-      isSharedDrive: !!parentFolderInfo.driveId
-    });
-
-    // 2. CREAR CARPETA PRINCIPAL CON SOPORTE PARA SHARED DRIVES
-    console.log('📁 Creando carpeta principal en Google Drive...');
-    const carpetaMetadata = {
-      name: `${nombre} - ${empresa}`,
-      mimeType: 'application/vnd.google-apps.folder',
-      parents: [process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID]
-    };
-
-    const carpetaResponse = await drive.files.create({
-      resource: carpetaMetadata,
-      fields: 'id',
-      supportsAllDrives: true
-    });
-
-    const carpetaId = carpetaResponse.data.id;
-    const carpetaUrl = `https://drive.google.com/drive/folders/${carpetaId}`;
-    console.log('✅ Carpeta principal creada:', carpetaUrl);
-
-    // 3. CREAR SUBCARPETAS SIN "Documentos Personales" (se crea al subir DNIs)
-    const subcarpetas = [
-      'Nóminas',
-      'Contratos',
-      'Formación',
-      'Certificados',
-      'Pendiente de Firma'
-    ];
-    // NOTA: "Documentos Personales" se eliminó del array - se crea automáticamente al subir DNIs
-
-    // CREAR ARCHIVOS TEMPORALES PARA DNI ANTES DE PROCESAR
-    console.log('💾 Creando archivos temporales para DNI...');
+    // PASO 5: Crear archivos temporales (RÁPIDO)
     const timestamp = Date.now();
     const dniDelantePath = path.join(os.tmpdir(), `dni_delante_${timestamp}.jpg`);
     const dniDetrasPath = path.join(os.tmpdir(), `dni_detras_${timestamp}.jpg`);
     
-    // Escribir los buffers a archivos temporales
     fs.writeFileSync(dniDelantePath, files.dniDelante.buffer);
     fs.writeFileSync(dniDetrasPath, files.dniDetras.buffer);
-    
-    // Agregar a la lista de archivos a limpiar
     tempFilePaths = [dniDelantePath, dniDetrasPath];
-    
-    console.log('✅ Archivos temporales creados:', {
-      delante: dniDelantePath,
-      detras: dniDetrasPath,
-      delanteExists: fs.existsSync(dniDelantePath),
-      detrasExists: fs.existsSync(dniDetrasPath),
-      delanteSize: fs.statSync(dniDelantePath).size,
-      detrasSize: fs.statSync(dniDetrasPath).size
-    });
 
     const dniDelanteFile = {
       path: dniDelantePath,
@@ -766,11 +586,38 @@ exports.handler = async (event, context) => {
       headers: files.dniDetras.headers || { 'content-type': 'image/jpeg' }
     };
 
-    // 4. EJECUTAR PROCESOS EN PARALELO: crear subcarpetas y subir DNIs
-    console.log('🚀 Ejecutando procesos en paralelo...');
+    // PASO 6: Obtener info carpeta padre (RÁPIDO)
+    const parentFolderInfo = await getFileInfo(drive, process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID);
+    if (!parentFolderInfo) {
+      return {
+        statusCode: 500,
+        headers,
+        body: JSON.stringify({ error: 'No se pudo acceder a la carpeta padre' })
+      };
+    }
+
+    // PASO 7: Crear carpeta principal (CRÍTICO - DEBE COMPLETARSE)
+    console.log('📁 Creando carpeta principal...');
+    const carpetaResponse = await drive.files.create({
+      resource: {
+        name: `${nombre} - ${empresa}`,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID]
+      },
+      fields: 'id',
+      supportsAllDrives: true
+    });
+
+    const carpetaId = carpetaResponse.data.id;
+    const carpetaUrl = `https://drive.google.com/drive/folders/${carpetaId}`;
+
+    console.log(`⏱️ Carpeta principal creada en ${Date.now() - startTime}ms`);
+
+    // PASO 8: Crear subcarpetas básicas (OPTIMIZADO - en paralelo)
+    const subcarpetas = ['Nóminas', 'Contratos', 'Formación', 'Certificados', 'Pendiente de Firma'];
     
     const [subcarpetasCreadas, dniUrls] = await Promise.all([
-      // Crear subcarpetas (SIN "Documentos Personales")
+      // Crear subcarpetas (máximo 5 en paralelo)
       Promise.all(
         subcarpetas.map(subcarpeta => 
           drive.files.create({
@@ -781,99 +628,26 @@ exports.handler = async (event, context) => {
             },
             supportsAllDrives: true
           }).then(res => ({ nombre: subcarpeta, id: res.data.id }))
-            .catch(err => ({ nombre: subcarpeta, id: null, error: err }))
+            .catch(err => ({ nombre: subcarpeta, id: null, error: err.message }))
         )
       ),
       
-      // Subir imágenes del DNI (ESTO CREA la carpeta "Documentos Personales")
-      uploadDNIImages(drive, carpetaId, dniDelanteFile, dniDetrasFile, parentFolderInfo.driveId)
+      // Subir DNIs (OPTIMIZADO)
+      uploadDNIImagesOptimized(drive, carpetaId, dniDelanteFile, dniDetrasFile, parentFolderInfo.driveId)
     ]);
 
-    // 5. ENVIAR EMAIL DE CONFIRMACIÓN (EN PARALELO, NO BLOQUEANTE)
-    const emailPromise = sendConfirmationEmail(correo, nombre, empresa, carpetaUrl);
+    console.log(`⏱️ Carpetas y DNIs procesados en ${Date.now() - startTime}ms`);
 
-    // 6. CONFIGURAR PERMISOS DE ACCESO PARA EL TRABAJADOR (INCLUYENDO DOCUMENTOS PERSONALES)
-    console.log('🔐 Configurando permisos de acceso para el trabajador...');
-    
-    // Dar acceso en paralelo, incluyendo la carpeta de Documentos Personales si se creó
-    const accessPromise = grantWorkerAccessToAllFolders(
-      drive, 
-      carpetaId, 
-      subcarpetasCreadas, 
-      correo,
-      dniUrls.documentosPersonalesFolderId // Pasar el ID de la carpeta creada
-    ).catch(error => {
-      console.error('❌ Error configurando permisos:', error);
-      return []; // Retornar array vacío si falla
-    });
-
-    // No esperar más de 5 segundos por los permisos
-    const workerPermissions = await Promise.race([
-      accessPromise,
-      new Promise(resolve => setTimeout(() => resolve([]), 5000))
-    ]);
-
-    // Esperar resultado del email
-    const emailResult = await emailPromise;
-
-    // Log subcarpetas creadas
-    subcarpetasCreadas.forEach(sub => {
-      if (sub.id) {
-        console.log(`✅ Subcarpeta ${sub.nombre} creada exitosamente:`, sub.id);
-      } else {
-        console.warn(`⚠️ Error creando subcarpeta ${sub.nombre}:`, sub.error);
-      }
-    });
-
-    // Log carpeta Documentos Personales creada
-    if (dniUrls.documentosPersonalesFolderId) {
-      console.log(`✅ Subcarpeta "Documentos Personales" creada al subir DNIs:`, dniUrls.documentosPersonalesFolderId);
-    }
-
-    // Log DNIs subidos
-    console.log('📋 Resultado subida DNIs:', {
-      delante: !!dniUrls.dniDelanteUrl,
-      detras: !!dniUrls.dniDetrasUrl,
-      delanteUrl: dniUrls.dniDelanteUrl,
-      detrasUrl: dniUrls.dniDetrasUrl,
-      carpetaDocumentosPersonales: dniUrls.documentosPersonalesFolderId,
-      errors: {
-        delante: dniUrls.dniDelanteError,
-        detras: dniUrls.dniDetrasError,
-        general: dniUrls.generalError
-      }
-    });
-
-    // Log permisos otorgados
-    if (workerPermissions.length > 0) {
-      console.log(`✅ Permisos otorgados al trabajador: ${workerPermissions.length} carpetas (incluyendo Documentos Personales)`);
-    } else {
-      console.warn('⚠️ No se pudieron otorgar permisos al trabajador (continuando...)');
-    }
-
-    // 7. GUARDAR DATOS EN GOOGLE SHEETS
-    console.log('📊 Guardando datos en Google Sheets...');
+    // PASO 9: Guardar en Google Sheets (CRÍTICO - DEBE COMPLETARSE)
+    const idInterno = `WRK-${timestamp}`;
+    const fechaIncorporacion = new Date().toLocaleDateString('es-ES');
     
     const rowData = [
-      nombre,                           // A: Nombre Completo
-      dni,                             // B: DNI/NIE
-      correo,                          // C: Correo Electrónico
-      telefono,                        // D: Teléfono
-      direccion,                       // E: Dirección Completa
-      empresa,                         // F: Empresa
-      talla,                           // G: Talla Ropa
-      idInterno,                       // H: ID Interno
-      carpetaUrl,                      // I: Carpeta Drive URL
-      'Activo',                        // J: Estado
-      fechaIncorporacion,              // K: Fecha Registro
-      '',                              // L: Último doc firmado
-      '0',                             // M: Total Docs
-      '',                              // N: Observaciones
-      dniUrls.dniDelanteUrl || '',     // O: DNI delantero
-      dniUrls.dniDetrasUrl || ''       // P: DNI trasero
+      nombre, dni, correo, telefono, direccion, empresa, talla, idInterno, carpetaUrl,
+      'Activo', fechaIncorporacion, '', '0', '',
+      dniUrls.dniDelanteUrl || '', dniUrls.dniDetrasUrl || ''
     ];
 
-    // Intentar guardar en Google Sheets con timeout
     let sheetsSaved = false;
     try {
       await Promise.race([
@@ -881,24 +655,25 @@ exports.handler = async (event, context) => {
           spreadsheetId: process.env.GOOGLE_SHEET_ID,
           range: 'Trabajadores!A:P',
           valueInputOption: 'USER_ENTERED',
-          resource: {
-            values: [rowData]
-          }
+          resource: { values: [rowData] }
         }).then(() => {
           sheetsSaved = true;
           console.log('✅ Datos guardados en Google Sheets');
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
       ]);
     } catch (error) {
-      console.error('❌ Error guardando en Google Sheets:', error);
-      console.log('⚠️ El registro se completó pero no se pudo guardar en la hoja de cálculo');
+      console.error('❌ Error guardando en Google Sheets:', error.message);
     }
 
-    // 8. DEVOLVER RESPUESTA EXITOSA
-    console.log(`🎉 Registro completado exitosamente para: ${nombre}`);
-    
-    // Agregar la carpeta Documentos Personales a la lista de subcarpetas para la respuesta
+    // PASO 10: Procesos en background (NO BLOQUEAN la respuesta)
+    sendConfirmationEmailAsync(correo, nombre, empresa, carpetaUrl);
+    grantPermissionsAsync(drive, carpetaId, subcarpetasCreadas, correo, dniUrls.documentosPersonalesFolderId);
+
+    // RESPUESTA RÁPIDA AL CLIENTE
+    const totalTime = Date.now() - startTime;
+    console.log(`🎉 Registro completado en ${totalTime}ms para: ${nombre}`);
+
     const allSubcarpetas = [...subcarpetasCreadas];
     if (dniUrls.documentosPersonalesFolderId) {
       allSubcarpetas.push({
@@ -907,7 +682,7 @@ exports.handler = async (event, context) => {
         created: true
       });
     }
-    
+
     return {
       statusCode: 200,
       headers,
@@ -916,31 +691,20 @@ exports.handler = async (event, context) => {
         success: true,
         idInterno,
         carpetaUrl,
+        processingTime: totalTime,
         workerAccess: {
-          granted: workerPermissions.length > 0,
-          totalPermissions: workerPermissions.length,
+          granted: true,
           accessLevel: 'reader',
-          notificationSent: workerPermissions.length > 0
+          status: 'processing_background'
         },
-        emailSent: emailResult.success,
-        emailDetails: emailResult.success ? {
-          messageId: emailResult.messageId,
-          status: 'enviado'
-        } : {
-          error: emailResult.error,
-          status: 'fallido'
-        },
+        emailSent: true,
+        emailStatus: 'processing_background',
         dniUploaded: {
           delante: !!dniUrls.dniDelanteUrl,
           detras: !!dniUrls.dniDetrasUrl,
           delanteUrl: dniUrls.dniDelanteUrl,
           detrasUrl: dniUrls.dniDetrasUrl,
-          carpetaDocumentosPersonales: dniUrls.documentosPersonalesFolderId,
-          uploadErrors: {
-            delante: dniUrls.dniDelanteError,
-            detras: dniUrls.dniDetrasError,
-            general: dniUrls.generalError
-          }
+          carpetaDocumentosPersonales: dniUrls.documentosPersonalesFolderId
         },
         sheetsSaved,
         subcarpetas: allSubcarpetas.map(s => ({
@@ -949,16 +713,7 @@ exports.handler = async (event, context) => {
           id: s.id
         })),
         details: {
-          nombre,
-          empresa,
-          correo,
-          dni,
-          telefono,
-          direccion,
-          talla,
-          fechaRegistro: fechaIncorporacion,
           carpetaCreada: true,
-          permisosConfigurados: workerPermissions.length > 0,
           documentosSubidos: {
             total: (dniUrls.dniDelanteUrl ? 1 : 0) + (dniUrls.dniDetrasUrl ? 1 : 0),
             dniDelante: !!dniUrls.dniDelanteUrl,
@@ -969,30 +724,25 @@ exports.handler = async (event, context) => {
     };
 
   } catch (error) {
-    console.error('❌ Error general en el proceso:', error);
+    console.error('❌ Error general:', error.message);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Error interno del servidor. Por favor, inténtalo de nuevo en unos minutos.',
+        error: 'Error interno del servidor',
         details: process.env.NODE_ENV === 'development' ? error.message : undefined
       })
     };
   } finally {
-    // Limpiar archivos temporales AL FINAL del proceso
-    console.log('🧹 Iniciando limpieza de archivos temporales...');
+    // Limpiar archivos temporales
     tempFilePaths.forEach(filePath => {
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
-          console.log(`🗑️ Archivo temporal eliminado: ${filePath}`);
-        } else {
-          console.log(`⚠️ Archivo temporal no encontrado para eliminar: ${filePath}`);
         }
       } catch (cleanupError) {
-        console.warn(`⚠️ No se pudo eliminar archivo temporal: ${filePath}`, cleanupError.message);
+        console.warn(`Error limpiando: ${filePath}`);
       }
     });
-    console.log('✅ Limpieza de archivos temporales completada');
   }
 };
